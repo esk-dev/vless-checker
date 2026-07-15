@@ -5,6 +5,7 @@ import asyncio
 import logging
 import time
 import re
+import sys
 from datetime import datetime
 from urllib.parse import unquote
 import base64
@@ -497,7 +498,87 @@ async def main():
     await monitor.run()
 
 
+def print_usage():
+    """Print usage information for command-line options."""
+    usage = """
+Usage: python3 gateway_manager.py [OPTIONS]
+
+Options:
+  --gen-ss                Generate a Shadowsocks key for Outline (using .env settings)
+  --gen-ss-full METHOD:PASS@IP:PORT
+                          Generate a Shadowsocks key with full parameters
+                          Format: METHOD:PASSWORD@IP:PORT
+                          Example: aes-256-gcm:mypassword@192.168.1.100:443
+  -h, --help              Show this help message
+
+Examples:
+  python3 gateway_manager.py --gen-ss
+  python3 gateway_manager.py --gen-ss-full "aes-256-gcm:my_password@192.168.1.100:443"
+"""
+    print(usage)
+
+
+def handle_cli_args():
+    """Handle command-line arguments for key generation."""
+    import sys
+    
+    if len(sys.argv) < 2:
+        return None
+    
+    arg = sys.argv[1]
+    
+    if arg in ("-h", "--help"):
+        print_usage()
+        return "help"
+    
+    if arg == "--gen-ss":
+        print("Generating Shadowsocks key from .env settings...")
+        print(f"  Method: {SS_METHOD}")
+        print(f"  Password: {SS_PASSWORD}")
+        print(f"  VPS IP: {os.getenv('VPS_IP', 'YOUR_VPS_IP_ADDRESS')}")
+        print(f"  Port: {os.getenv('SS_INBOUND_PORT', '443')}")
+        print()
+        ss_link = generate_shadowsocks_key()
+        print(f"\n✅ Generated Shadowsocks link:\n{ss_link}")
+        return "gen-ss"
+    
+    if arg == "--gen-ss-full":
+        if len(sys.argv) < 3:
+            print("❌ Error: --gen-ss-full requires a parameter in format METHOD:PASS@IP:PORT")
+            print("Example: aes-256-gcm:my_password@192.168.1.100:443")
+            return None
+        param = sys.argv[2]
+        try:
+            # Parse format: METHOD:PASS@IP:PORT
+            auth_part, host_part = param.split("@")
+            method, password = auth_part.split(":", 1)
+            ip, port = host_part.rsplit(":", 1)
+            ss_link = generate_shadowsocks_key_with_params(
+                ss_method=method,
+                ss_password=password,
+                vps_ip=ip,
+                ss_port=int(port)
+            )
+            print(f"\n✅ Generated Shadowsocks link:\n{ss_link}")
+            return "gen-ss-full"
+        except ValueError as e:
+            print(f"❌ Error parsing parameter: {e}")
+            print("Format: METHOD:PASSWORD@IP:PORT")
+            print("Example: aes-256-gcm:my_password@192.168.1.100:443")
+            return None
+    
+    return None
+
+
 if __name__ == "__main__":
+    # Handle CLI arguments first
+    cli_result = handle_cli_args()
+    
+    if cli_result in ("help", "gen-ss", "gen-ss-full"):
+        # Key generation mode - exit after generating
+        sys.exit(0)
+    
+    # Run normal gateway monitor
     try:
         asyncio.run(main())
     except KeyboardInterrupt:

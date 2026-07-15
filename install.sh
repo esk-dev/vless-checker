@@ -100,6 +100,10 @@ setup_services() {
 
     log "Starting vless-checker.timer..."
     systemctl enable --now vless-checker.timer
+    
+    # Generate Outline Shadowsocks key
+    log "Generating Outline Shadowsocks key..."
+    /usr/bin/python3 /home/developer/vless-checker/gateway_manager.py --gen-ss
 }
 
 verify_installation() {
@@ -132,7 +136,6 @@ main() {
     echo -e "${GREEN} Installation completed successfully! ${NC}"
     echo -e "${GREEN}====================================================${NC}"
     echo -e "Project Directory: $(pwd)"
-    echo -e "Your Shadowsocks-2022 password has been generated and saved in .env"
     echo -e "To check logs, use: ${YELLOW}journalctl -u vless-gateway.service -f${NC}"
     echo -e "To check checker logs, use: ${YELLOW}journalctl -u vless-checker.service -f${NC}"
     echo -e "${GREEN}====================================================${NC}"
