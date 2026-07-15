@@ -3,7 +3,58 @@ import requests
 import socket
 import time
 import sys
+import asyncio
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# Список ресурсов для проверки доступности.
+# Разделен на категории для удобства мониторинга.
+CHECK_RESOURCES = {
+    # --- Основные сервисы (Global) ---
+    "Google": "https://www.google.com",
+    "GitHub": "https://github.com",
+    "Cloudflare": "https://1.1.1.1",
+    
+    # --- Заблокированные/Ограниченные в РФ (Blocked in RU) ---
+    "Telegram": "https://api.telegram.org",
+    "Instagram": "https://www.instagram.com",
+    "Facebook": "https://www.facebook.com",
+    "Twitter/X": "https://twitter.com",
+    "YouTube": "https://www.youtube.com",
+    "Netflix": "https://www.netflix.com",
+    "OpenAI (ChatGPT)": "https://chat.openai.com",
+    "Discord": "https://discord.com",
+    
+    # --- Сервисы, ушедшие из РФ (Exited RU) ---
+    "Microsoft (Auth)": "https://login.microsoftonline.com",
+    "Adobe": "https://www.adobe.com",
+    "Spotify": "https://www.spotify.com",
+    "Steam": "https://store.steampowered.com"
+}
+
+def check_resource_availability(name, url):
+    """Проверяет доступность конкретного ресурса через HTTP."""
+    try:
+        response = requests.get(url, timeout=5)
+        return response.status_code < 400
+    except Exception:
+        return False
+
+def run_resource_checks():
+    """Запускает проверку всех ресурсов."""
+    print("\n🔍 Проверка доступности ключевых сервисов...")
+    all_ok = True
+    for name, url in CHECK_RESOURCES.items():
+        is_ok = check_resource_availability(name, url)
+        status = "✅" if is_ok else "❌"
+        print(f"  [{status}] {name}: {url}")
+        if not is_ok:
+            all_ok = False
+    
+    if all_ok:
+        print("🌐 Все основные сервисы доступны.\n")
+    else:
+        print("⚠️ Внимание: Некоторые сервисы недоступны. Проверьте соединение.\n")
+    return all_ok
 
 # Прямая ссылка на raw-файл с ключами
 GITHUB_RAW_URL = "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/BLACK_VLESS_RUS.txt"
@@ -63,6 +114,9 @@ def test_key(key):
 
 
 def main():
+    # Сначала проверяем общую доступность интернета/сервисов
+    run_resource_checks()
+    
     keys = fetch_keys(GITHUB_RAW_URL)
 
     print(f"🔍 Тестируем {len(keys)} ключей...\n")
