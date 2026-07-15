@@ -6,7 +6,7 @@ After=network.target
 Type=oneshot
 # Убедитесь, что путь ниже соответствует вашему реальному пути к проекту
 WorkingDirectory=/home/developer/vless-checker
-ExecStart=/home/developer/bin/python3 /home/developer/vless-checker/check_and_save.py
+ExecStart=/usr/bin/python3 /home/developer/vless-checker/check_and_save.py
 StandardOutput=journal
 StandardError=journal
 
