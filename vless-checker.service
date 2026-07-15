@@ -4,7 +4,6 @@ After=network.target
 
 [Service]
 Type=oneshot
-User=root
 # Убедитесь, что путь ниже соответствует вашему реальному пути к проекту
 WorkingDirectory=/home/root/vless-rotator
 ExecStart=/usr/bin/python3 /home/root/vless-rotator/checker.py
