@@ -1,0 +1,11 @@
+[Unit]
+Description=Run VLESS Checker every 30 minutes
+
+[Timer]
+# Запуск каждые 30 минут
+OnCalendar=*:0/30
+# Если сервер был выключен, запустить сразу после включения
+Persistent=true
+
+[Install]
+WantedBy=timers.target

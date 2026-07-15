@@ -4,7 +4,7 @@
 
 ---
 
-## 🚀 Основные компоненты
+## 🚀 Основные компоненты (Core Components)
 
 ### 1. `gateway_manager.py` (Движок самовосстановления)
 Основной сервис, который обеспечивает работу вашего соединения 24/7.
@@ -24,10 +24,10 @@
 
 ---
 
-## 🛠️ Установка и настройка
+## 🛠️ Установка и настройка (Installation & Setup)
 
 ### 1. Установка Xray-core
-На вашем VPS (Ubuntu/Debian):
+На вашем VPS (Ubuntu/Deb Debian):
 ```bash
 bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
 ```
@@ -38,35 +38,97 @@ bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release
 3. Запустите менеджер: `python3 gateway_manager.py`. Он автоматически создаст `xray_config.json`.
 
 ### 3. Запуск как сервис (Production)
-Создайте файл `/etc/systemd/system/vless-gateway.service`:
+Чтобы шлюз работал постоянно и автоматически перезапускался при сбоях, используйте `systemd`.
+
+1. Создайте файл `/etc/systemd/system/vless-gateway.service`:
 ```ini
 [Unit]
 Description=VLESS Self-Healing Gateway
 After=network.target
 
 [Service]
+# Укажите пользователя, от которого работает сервис
 User=root
+# Укажите полный путь к директории проекта
 WorkingDirectory=/home/user/vless-checker
-ExecStart=/usr/bin/python3 gateway_manager.py
+# Укажите полный путь к python3 и вашему скрипту
+ExecStart=/usr/bin/python3 /home/user/vless-checker/gateway_manager.py
 Restart=always
 
 [Install]
 WantedBy=multi-user.target
 ```
-Включите сервис: `sudo systemctl enable --now vless-gateway`
+
+2. Включите и запустите сервис:
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now vless-gateway
+```
+
+### 4. Автоматическое обновление ключей (Checker Timer)
+Для автоматического обновления базы ключей каждые 30 минут, настройте `systemd timer`:
+
+1. Создайте `/etc/systemd/system/vless-checker.service`:
+```ini
+[Unit]
+Description=VLESS Key Checker Task
+After=network.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/user/vless-checker
+ExecStart=/usr/bin/python3 /home/user/vless-checker/checker.py
+StandardOutput=journal
+StandardError=journal
+```
+
+2. Создайте `/etc/systemd/system/vless-checker.timer`:
+```ini
+[Unit]
+Description=Run VLESS Checker every 30 minutes
+
+[Timer]
+OnCalendar=*:0/30
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+3. Запустите таймер:
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now vless-checker.timer
+```
 
 ---
 
-## 📡 Руководство по подключению
+## ⚙️ Настройка переменных окружения (Environment Variables)
+
+Для гибкой настройки используйте файл `.env`. Создайте его на основе `.env.example`.
+
+| Переменная | Описание | Значение по умолчанию |
+| :--- | :--- | :--- |
+| `KEYS_JSON_PATH` | Путь к `keys.json` | `docs/keys.json` |
+| `XRAY_CONFIG_PATH` | Путь к генерируемому конфигу Xray | `xray_config.json` |
+| `CHECK_TIMEOUT` | Таймаут проверки узла (сек) | `5.0` |
+| `CHECK_INTERVAL` | Интервал проверки (сек) | `10.0` |
+| `SS_INBOUND_PORT` | Порт для Shadowsocks-2022 | `8388` |
+| `SS_PASSWORD` | Пароль для Shadowsocks-2022 | `secure_password_123` |
+| `SS_METHOD` | Метод шифрования SS | `2022-blake3-aes-128-gcm` |
+
+---
+
+## 📡 Руководство по подключению (Connection Guide)
 
 ### 1. Генерация надежного пароля Shadowsocks
 Для протокола **Shadowsocks-2022** (`2022-blake3-aes-128-gcm`) требуется ключ длиной 16 байт. Сгенерируйте его через терминал:
 ```bash
 openssl rand -base64 16
 ```
-Добавьте результат в ваш файл `.env`: `SS_PASSWORD=ваш_сгенерированный_ключ`.
+Добавьте результат в ваш `.env` файл: `SS_PASSWORD=ваш_сгенерированный_ключ`.
 
-### 2. Строки подключения (для клиента)
+### 2. Строки подключения (Connection Strings)
 
 | Протокол | Формат / Пример |
 | :--- | :--- |
@@ -88,7 +150,7 @@ openssl rand -base64 16
 
 ---
 
-## 📂 Структура проекта
+## 📂 Структура проекта (Project Structure)
 - `gateway_manager.py` - Основной сервис ротации и мониторинга.
 - `checker.py` - Скрипт скрапинга и проверки доступности сервисов.
 - `docs/keys.json` - База данных узлов.

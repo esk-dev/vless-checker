@@ -1,0 +1,15 @@
+[Unit]
+Description=VLESS Self-Healing Gateway
+After=network.target
+
+[Service]
+# Укажите пользователя, от которого работает сервис
+User=root
+# Укажите полный путь к директории проекта
+WorkingDirectory=/home/root/vless-rotator
+# Укажите полный путь к python3 и вашему скрипту
+ExecStart=/usr/bin/python3 /home/root/vless-rotator/gateway_manager.py
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
