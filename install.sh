@@ -47,6 +47,7 @@ install_dependencies() {
     apt install -y curl python3 python3-pip openssl jq
     
     log "Installing Python dependencies..."
+    python3 -m venv ./
     pip3 install python-dotenv requests
 }
 
