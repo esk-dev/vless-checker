@@ -9,7 +9,7 @@ Group=developer
 # Укажите полный путь к директории проекта
 WorkingDirectory=/home/developer/vless-checker
 # Укажите полный путь к python3 и вашему скрипту
-ExecStart=/usr/bin/python3 /home/developer/vless-checker/gateway_manager.py
+ExecStart=/home/developer/bin/python3 /home/developer/vless-checker/gateway_manager.py
 Restart=always
 
 [Install]
