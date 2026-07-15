@@ -16,6 +16,7 @@
   - **Российский трафик:** Направляется напрямую (используя `geoip:ru` и `geosite:ru`), чтобы сервисы видели ваш локальный IP.
   - **Зарубежный трафик:** Направляется через **VLESS-прокси** для скрытия вашего реального IP.
 - **Shadowsocks-2022 Inbound:** Предоставляет защищенную точку входа (порт по умолчанию `8388`).
+- **Multi-Client Support:** Поддержка нескольких клиентов с уникальными UUID в режиме `multi`.
 
 ### 2. `checker.py` (Скрапер и монитор здоровья)
 - **Скрапинг:** Загружает актуальные VLESS-ключи с GitHub.
@@ -27,17 +28,45 @@
 ## 🛠️ Установка и настройка (Installation & Setup)
 
 ### 1. Установка Xray-core
-На вашем VPS (Ubuntu/Deb Debian):
+На вашем VPS (Ubuntu/Debian):
 ```bash
 bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
 ```
 
 ### 2. Конфигурация
+
+#### Способ 1: Одиночный ключ (Single Mode - по умолчанию)
 1. Убедитесь, что в `docs/keys.json` есть рабочие VLESS-ключи.
 2. Настройте `.env` (пароль для Shadowsocks, порты и т.д.).
 3. Запустите менеджер: `python3 gateway_manager.py`. Он автоматически создаст `xray_config.json`.
 
+#### Способ 2: Мульти-клиент (Multi Mode)
+Для одновременной работы нескольких клиентов с уникальными UUID:
+
+1. Создайте `.env` файл со следующими настройками:
+```env
+GATEWAY_MODE=multi
+CLIENT_UUIDS=uuid1,uuid2,uuid3
+CLIENT_KEYS=key1,key2,key3
+```
+
+2. Сгенерируйте UUID для каждого клиента:
+```bash
+python3 -c "import uuid; print(uuid.uuid4())"
+```
+
+3. Поместите рабочие VLESS-ключи в `CLIENT_KEYS` (количество должно совпадать с UUID).
+
+4. Запустите менеджер: `python3 gateway_manager.py`.
+
+**Особенности Multi Mode:**
+- Все клиенты подключены одновременно
+- Каждый клиент имеет свой уникальный UUID
+- Xray использует routing rules для маршрутизации трафика
+- Нет ротации ключей (все узлы работают параллельно)
+
 ### 3. Запуск как сервис (Production)
+
 Чтобы шлюз работал постоянно и автоматически перезапускался при сбоях, используйте `systemd`.
 
 1. Создайте файл `/etc/systemd/system/vless-gateway.service`:
@@ -110,12 +139,27 @@ sudo systemctl enable --now vless-checker.timer
 | Переменная | Описание | Значение по умолчанию |
 | :--- | :--- | :--- |
 | `KEYS_JSON_PATH` | Путь к `keys.json` | `docs/keys.json` |
-| `XRAY_CONFIG_PATH` | Путь к генерируемому конфигу Xray | `xray_config.json` |
+| `XRAY_CONFIG_PATH` | Путь к генерируемому конфигу Xray | `/usr/local/etc/xray/config.json` |
 | `CHECK_TIMEOUT` | Таймаут проверки узла (сек) | `5.0` |
 | `CHECK_INTERVAL` | Интервал проверки (сек) | `10.0` |
 | `SS_INBOUND_PORT` | Порт для Shadowsocks-2022 | `8388` |
 | `SS_PASSWORD` | Пароль для Shadowsocks-2022 | `secure_password_123` |
 | `SS_METHOD` | Метод шифрования SS | `2022-blake3-aes-128-gcm` |
+| `GATEWAY_MODE` | Режим работы: `single` или `multi` | `single` |
+| `XRAY_OUTBOUND_NETWORK` | Тип сети для outbound: `tcp`, `xhttp`, `ws` | `tcp` |
+| `XRAY_SECURITY` | Тип безопасности: `tls`, `reality`, `none` | `tls` |
+| `CLIENT_UUIDS` | UUID клиентов (через запятую) | - |
+| `CLIENT_KEYS` | VLESS ключи клиентов (через запятую) | - |
+
+### Multi-Client Настройка
+
+| Переменная | Описание | Пример |
+| :--- | :--- | :--- |
+| `GATEWAY_MODE` | Режим multi-клиента | `multi` |
+| `CLIENT_UUIDS` | UUID через запятую | `uuid1,uuid2,uuid3` |
+| `CLIENT_KEYS` | VLESS ключи через запятую | `key1,key2,key3` |
+
+**Примечание:** Количество UUID должно совпадать с количеством ключей!
 
 ---
 
@@ -148,6 +192,8 @@ openssl rand -base64 16
 | **Конфликт портов** | **Порт занят** | Проверьте: `sudo netstat -tulpn \| grep LISTEN`. Измените порты в `.env`. |
 | **Сайты РФ через VPN** | **Ошибка маршрутизации** | Убедитесь, что правила `geoip:ru` стоят **выше** общего правила `proxy` в конфиге. |
 | **Ошибка Permission Denied в логах** | **Права доступа к файлам** | Мы перешли на логирование через `stdout`. Теперь логи смотрятся через `journalctl -u vless-gateway`. |
+| **Multi mode не подключаются клиенты** | **Несовпадение UUID и ключей** | Проверьте, что количество UUID в `CLIENT_UUIDS` совпадает с количеством ключей в `CLIENT_KEYS`. |
+| **Множество "rotation failed"** | **Все ключи мертвы** | Проверьте доступность ключей через `checker.py` или обновите `docs/keys.json`. |
 
 ---
 
@@ -156,4 +202,66 @@ openssl rand -base64 16
 - `checker.py` - Скрипт скрапинга и проверки доступности сервисов.
 - `docs/keys.json` - База данных узлов.
 - `.env.example` - Шаблон переменных окружения.
+- `.env` - (Создается) Переменные окружения для конфигурации.
 - `xray_config.json` - (Генерируется) Активный конфиг Xray.
+- `vless-gateway.service` - Systemd service для запуска.
+- `vless-checker.timer` - Systemd timer для обновления ключей.
+
+---
+
+## 🔐 Безопасность (Security)
+
+1. **Храните `.env` в секрете:** Не публикуйте файл `.env` в репозитории.
+2. **Используйте UUID4 для клиентов:** Генерируйте уникальные UUID для каждого клиента.
+3. **Периодическая смена паролей:** Обновляйте пароли Shadowsocks регулярно.
+4. **Проверка целостности:** Используйте `checker.py` для регулярной проверки рабочих ключей.
+
+---
+
+## 📝 Примеры конфигурации
+
+### Пример 1: Single Mode (один ключ)
+```env
+KEYS_JSON_PATH=docs/keys.json
+SS_INBOUND_PORT=8388
+SS_PASSWORD=secure_password_123
+```
+
+### Пример 2: Multi Mode (несколько клиентов)
+```env
+GATEWAY_MODE=multi
+SS_INBOUND_PORT=8388
+SS_PASSWORD=secure_password_123
+CLIENT_UUIDS=4b056394-2f40-11f1-bffe-46c4782ac1a7,58be4691-5430-417a-96e3-02736d151490
+CLIENT_KEYS=vless://4b056394-2f40-11f1-bffe-46c4782ac1a7@77.233.215.78:443?security=tls&encryption=none&flow=xtls-rprx-vision&sni=example.com,vless://58be4691-5430-417a-96e3-02736d151490@77.233.215.78:443?security=tls&encryption=none&flow=xtls-rprx-vision&sni=example.com
+```
+
+### Пример 3: With Reality Protocol
+```env
+GATEWAY_MODE=single
+XRAY_SECURITY=reality
+XRAY_OUTBOUND_NETWORK=tcp
+CLIENT_UUIDS=
+CLIENT_KEYS=
+```
+
+### Пример 4: Single Mode с сервером 77.233.215.78
+```env
+SS_INBOUND_PORT=8388
+SS_PASSWORD=secure_password_123
+CLIENT_KEYS=vless://4b056394-2f40-11f1-bffe-46c4782ac1a7@77.233.215.78:443?security=tls&encryption=none&flow=xtls-rprx-vision&sni=example.com
+```
+
+---
+
+## 🆘 Поддержка (Support)
+
+Если у вас возникли проблемы с проектом:
+1. Проверьте логи: `journalctl -u vless-gateway -f`
+2. Проверьте конфигурацию в `xray_config.json`
+3. Убедитесь, что ключи работают через `checker.py`
+4. Проверьте права доступа к файлам
+
+---
+
+*Последнее обновление: 2026-07-15*
