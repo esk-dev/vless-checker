@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 # Configuration (Ideally loaded from environment variables)
 KEYS_JSON_PATH = os.getenv("KEYS_JSON_PATH", "docs/keys.json")
-XRAY_CONFIG_PATH = os.getenv("XRAY_CONFIG_PATH", "xray_config.json")
+XRAY_CONFIG_PATH = os.getenv("XRAY_CONFIG_PATH", "config.json")
 CHECK_TIMEOUT = float(os.getenv("CHECK_TIMEOUT", 5.0))
 CHECK_INTERVAL = float(os.getenv("CHECK_INTERVAL", 10.0))
 
@@ -184,8 +184,7 @@ class XrayManager:
             logger.info(f"Restarting Xray service: {self.xray_service_name}...")
             
             # In production, use:
-            # await asyncio.create_subprocess_shell(f"sudo systemctl restart {self.xray_service_name}")
-            await asyncio.sleep(1) 
+            await asyncio.create_subprocess_shell(f"sudo systemctl restart {self.xray_service_name}")
             
             self.current_key = key
             return True
