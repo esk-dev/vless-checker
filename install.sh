@@ -45,6 +45,9 @@ install_dependencies() {
     log "Installing system dependencies..."
     apt update
     apt install -y curl python3 python3-pip openssl jq
+    
+    log "Installing Python dependencies..."
+    pip3 install python-dotenv requests
 }
 
 install_xray() {

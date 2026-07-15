@@ -8,6 +8,14 @@ import re
 from datetime import datetime
 from urllib.parse import unquote
 
+# Load environment variables from .env file
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    # dotenv not installed, environment variables will be loaded from system
+    pass
+
 # Configure logging
 # We only use StreamHandler so that logs are captured by systemd journal
 logging.basicConfig(
