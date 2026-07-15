@@ -47,7 +47,7 @@ install_dependencies() {
     apt install -y curl python3 python3-pip openssl jq
     
     log "Installing Python dependencies..."
-    python3 -m venv ./
+    /usr/bin/python3 -m venv /home/developer/vless-checker
     pip3 install python-dotenv requests
 }
 
