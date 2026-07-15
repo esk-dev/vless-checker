@@ -20,8 +20,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Configuration (Ideally loaded from environment variables)
-KEYS_JSON_PATH = os.getenv("KEYS_JSON_PATH", "docs/keys.json")
-XRAY_CONFIG_PATH = os.getenv("XRAY_CONFIG_PATH", "config.json")
+# We use absolute paths to avoid PermissionError when running as a service
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+KEYS_JSON_PATH = os.getenv("KEYS_JSON_PATH", os.path.join(BASE_DIR, "docs/keys.json"))
+# Default path set to standard Xray system config location
+XRAY_CONFIG_PATH = os.getenv("XRAY_CONFIG_PATH", "/usr/local/etc/xray/config.json")
 CHECK_TIMEOUT = float(os.getenv("CHECK_TIMEOUT", 5.0))
 CHECK_INTERVAL = float(os.getenv("CHECK_INTERVAL", 10.0))
 

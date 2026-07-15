@@ -5,6 +5,7 @@ After=network.target
 [Service]
 # Укажите пользователя, от которого работает сервис
 User=developer
+Group=developer
 # Укажите полный путь к директории проекта
 WorkingDirectory=/home/developer/vless-checker
 # Укажите полный путь к python3 и вашему скрипту
