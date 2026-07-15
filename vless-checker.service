@@ -5,8 +5,8 @@ After=network.target
 [Service]
 Type=oneshot
 # Убедитесь, что путь ниже соответствует вашему реальному пути к проекту
-WorkingDirectory=/home/root/vless-rotator
-ExecStart=/usr/bin/python3 /home/root/vless-rotator/checker.py
+WorkingDirectory=/home/developer/vless-rotator
+ExecStart=/usr/bin/python3 /home/developer/vless-rotator/checker.py
 StandardOutput=journal
 StandardError=journal
 
