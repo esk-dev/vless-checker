@@ -9,11 +9,11 @@ from datetime import datetime
 from urllib.parse import unquote
 
 # Configure logging
+# We only use StreamHandler so that logs are captured by systemd journal
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("gateway_manager.log"),
         logging.StreamHandler()
     ]
 )

@@ -79,11 +79,11 @@ setup_services() {
     
     # Prepare service files with absolute paths
     # vless-gateway.service
-    sed "s|/home/user/vless-checker|$PROJECT_DIR|g" vless-gateway.service > /tmp/vless-gateway.service
+    sed "s|/home/developer/vless-checker|$PROJECT_DIR|g" vless-gateway.service > /tmp/vless-gateway.service
     cp /tmp/vless-gateway.service /etc/systemd/system/vless-gateway.service
     
     # vless-checker.service
-    sed "s|/home/user/vless-checker|$PROJECT_DIR|g" vless-checker.service > /tmp/vless-checker.service
+    sed "s|/home/developer/vless-checker|$PROJECT_DIR|g" vless-checker.service > /tmp/vless-checker.service
     cp /tmp/vless-checker.service /etc/systemd/system/vless-checker.service
     
     # vless-checker.timer
