@@ -48,7 +48,7 @@ install_dependencies() {
     
     log "Installing Python dependencies..."
     /usr/bin/python3 -m venv /home/developer/vless-checker
-    /home/developer/vless-checker/bin/pip3 install python-dotenv requests
+    /home/developer/vless-checker/bin/pip3 install python-dotenv requests base64
 }
 
 install_xray() {

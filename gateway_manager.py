@@ -7,6 +7,7 @@ import time
 import re
 from datetime import datetime
 from urllib.parse import unquote
+import base64
 
 # Load environment variables from .env file
 try:
@@ -26,6 +27,82 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+
+def generate_shadowsocks_key(ss_method: str = None, ss_password: str = None) -> str:
+    """
+    Generate a Shadowsocks shareable link for Outline clients.
+    
+    Format: ss://[BASE64(method:password)]@[IP]:PORT#TAG
+    
+    Args:
+        ss_method: Encryption method (e.g., 'aes-256-gcm', '2022-blake3-aes-128-gcm')
+        ss_password: Password for the Shadowsocks connection
+        
+    Returns:
+        A shareable Shadowsocks URL for Outline clients
+    """
+    method = ss_method or SS_METHOD
+    password = ss_password or SS_PASSWORD
+    
+    # Combine method and password with colon
+    auth_string = f"{method}:{password}"
+    
+    # Encode to Base64
+    encoded_auth = base64.b64encode(auth_string.encode('utf-8')).decode('utf-8')
+    
+    # Get VPS IP from environment or use placeholder
+    # In production, this would be the server's public IP
+    vps_ip = os.getenv("VPS_IP", "YOUR_VPS_IP_ADDRESS")
+    
+    # Port for Shadowsocks (from environment or default)
+    ss_port = int(os.getenv("SS_INBOUND_PORT", 8338))
+    
+    # Create the shareable link
+    ss_link = f"ss://{encoded_auth}@{vps_ip}:{ss_port}#MyVLESSRotator"
+    
+    logger.info(f"Generated Shadowsocks key: {ss_link[:30]}...")
+    
+    return ss_link
+
+
+def generate_shadowsocks_key_with_params(
+    ss_method: str = None,
+    ss_password: str = None,
+    vps_ip: str = None,
+    ss_port: int = None
+) -> str:
+    """
+    Generate a Shadowsocks shareable link for Outline clients with custom parameters.
+    
+    Format: ss://[BASE64(method:password)]@[IP]:PORT#TAG
+    
+    Args:
+        ss_method: Encryption method (e.g., 'aes-256-gcm', '2022-blake3-aes-128-gcm')
+        ss_password: Password for the Shadowsocks connection
+        vps_ip: IP address of your VPS/server
+        ss_port: Port for the Shadowsocks service (default: 8338)
+        
+    Returns:
+        A shareable Shadowsocks URL for Outline clients
+    """
+    method = ss_method or SS_METHOD
+    password = ss_password or SS_PASSWORD
+    ip = vps_ip or os.getenv("VPS_IP", "YOUR_VPS_IP_ADDRESS")
+    port = ss_port or int(os.getenv("SS_INBOUND_PORT", 8388))
+    
+    # Combine method and password with colon
+    auth_string = f"{method}:{password}"
+    
+    # Encode to Base64
+    encoded_auth = base64.b64encode(auth_string.encode('utf-8')).decode('utf-8')
+    
+    # Create the shareable link
+    ss_link = f"ss://{encoded_auth}@{ip}:{port}#MyVLESSRotator"
+    
+    logger.info(f"Generated Shadowsocks key with params")
+    
+    return ss_link
 
 # Configuration (Ideally loaded from environment variables)
 # We use absolute paths to avoid PermissionError when running as a service

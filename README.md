@@ -218,7 +218,75 @@ openssl rand -base64 16
 
 ---
 
-## 📝 Примеры конфигурации
+## 📡 Генерация ключей Outline (Outline Key Generation)
+
+### Использование функции `generate_shadowsocks_key()`
+
+В [`gateway_manager.py`](gateway_manager.py:1) есть две функции для генерации Shadowsocks ссылок:
+
+#### 1. `generate_shadowsocks_key(ss_method=None, ss_password=None)`
+Генерирует ключ, используя параметры из `.env` файла.
+
+#### 2. `generate_shadowsocks_key_with_params(ss_method, ss_password, vps_ip, ss_port)`
+Генерирует ключ с пользовательскими параметрами.
+
+### Пример использования
+
+```python
+from gateway_manager import generate_shadowsocks_key, generate_shadowsocks_key_with_params
+
+# Используя параметры из .env
+ss_link = generate_shadowsocks_key()
+print(ss_link)
+# Вывод: ss://YWVzLTI1Ni1nY206c2VjdXJlX3Bhc3N3b3Jk@123.456.789.0:443#MyVLESSRotator
+
+# С пользовательскими параметрами
+ss_link = generate_shadowsocks_key_with_params(
+    ss_method="aes-256-gcm",
+    ss_password="my_strong_password",
+    vps_ip="192.168.1.100",
+    ss_port=443
+)
+print(ss_link)
+# Вывод: ss://YWVzLTI1Ni1nY206bXlfc3Ryb25nX3Bhc3N3b3Jk@192.168.1.100:443#MyVLESSRotator
+```
+
+### Ручная генерация (для справки)
+
+Outline принимает конфигурацию в виде специальной ссылки, которая кодируется в формат Base64.
+
+1. **Объедините метод и пароль:**
+   ```
+   aes-256-gcm:your_strong_password
+   ```
+
+2. **Закодируйте в Base64:**
+   ```bash
+   echo -n "aes-256-gcm:your_strong_password" | base64
+   # Вывод: YWVzLTI1Ni1nY206eW91cl9zdHJvbmdfcGFzc3dvcmQ=
+   ```
+
+3. **Сформируйте ссылку:**
+   ```
+   ss://YWVzLTI1Ni1nY206eW91cl9zdHJvbmdfcGFzc3dvcmQ=@192.168.1.100:443#MyVLESSRotator
+   ```
+
+### Настройка в `.env`
+
+Для автоматической генерации добавьте в `.env`:
+
+```env
+SS_VPS_IP=ВАШ_VPS_IP_АДРЕС
+SS_OUTBOUND_PORT=443
+SS_PASSWORD=ваш_пароль
+SS_METHOD=aes-256-gcm
+```
+
+> **Важно:** `SS_VPS_IP` должен быть вашим реальным публичным IP-адресом VPS.
+
+---
+
+## � Примеры конфигурации
 
 ### Пример 1: Single Mode (один ключ)
 ```env
