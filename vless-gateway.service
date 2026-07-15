@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 # Укажите пользователя, от которого работает сервис
-User=admin
+User=developer
 # Укажите полный путь к директории проекта
 WorkingDirectory=/home/developer/vless-rotator
 # Укажите полный путь к python3 и вашему скрипту
