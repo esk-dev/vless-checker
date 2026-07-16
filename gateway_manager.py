@@ -381,12 +381,12 @@ class XrayManager:
                 "rules": routing_rules + [
                     {
                         "type": "field",
-                        "domain": ["geosite:ru"],
+                        "domain": ["geosite:ru-blocked"],
                         "outboundTag": "direct"
                     },
                     {
                         "type": "field",
-                        "ip": ["geoip:ru"],
+                        "ip": ["geoip:ru-blocked"],
                         "outboundTag": "direct"
                     }
                 ]
