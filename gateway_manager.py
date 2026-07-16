@@ -252,6 +252,9 @@ class XrayManager:
 
     def _build_vless_outbound(self, vless_info, tag, client_uuid=None):
         """Build a single VLESS outbound configuration."""
+        security = vless_info["security"]
+        flow = vless_info.get("flow", "")
+        
         outbound = {
             "protocol": vless_info["type"],
             "settings": {
@@ -260,17 +263,23 @@ class XrayManager:
                         {
                             "id": vless_info["uuid"] if client_uuid is None else client_uuid,
                             "encryption": vless_info["encryption"],
-                            "flow": "xtls-rprx-vision" if vless_info["security"] == "tls" else ""
+                            "flow": flow
                         }
                     ]
                 }
             },
             "streamSettings": {
                 "network": XRAY_OUTBOUND_NETWORK,
-                "security": vless_info["security"],
+                "security": security,
                 "tlsSettings": {
                     "serverName": vless_info["sni"]
-                } if vless_info["security"] == "tls" else None
+                } if security == "tls" else None,
+                "realitySettings": {
+                    "serverName": vless_info["sni"],
+                    "publicKey": "",
+                    "shortId": "",
+                    "spiderX": ""
+                } if security == "reality" else None
             },
             "tag": tag
         }
@@ -278,6 +287,8 @@ class XrayManager:
         # Clean up None values in streamSettings
         if outbound["streamSettings"]["tlsSettings"] is None:
             del outbound["streamSettings"]["tlsSettings"]
+        if outbound["streamSettings"]["realitySettings"] is None:
+            del outbound["streamSettings"]["realitySettings"]
             
         return outbound
 
@@ -443,15 +454,35 @@ class XrayManager:
             except Exception as e:
                 logger.error(f"Could not read old config: {e}")
         
+        # Step 1: Write config to file
+        logger.info(f"STEP 1: Attempting to write config to {self.config_path}")
         try:
+            logger.info(f"Opening file for writing: {self.config_path}")
             with open(self.config_path, "w") as f:
+                logger.info(f"File opened successfully, writing JSON...")
                 json.dump(config, f, indent=2)
+                logger.info(f"JSON written successfully")
             
+            logger.info(f"STEP 2: Verifying written config")
             logger.info(f"SUCCESS: New config written to {self.config_path}")
-            logger.info(f"Restarting Xray service: {self.xray_service_name}...")
+            
+            # Verify the file was written correctly
+            try:
+                logger.info(f"Opening file for verification read: {self.config_path}")
+                with open(self.config_path, "r") as f:
+                    content = f.read()
+                logger.info(f"VERIFICATION: Read back config file, size: {len(content)} bytes")
+                logger.info(f"VERIFICATION: First 200 chars: {content[:200]}")
+                logger.info(f"VERIFICATION: File path resolved to: {os.path.realpath(self.config_path)}")
+            except Exception as e:
+                logger.error(f"VERIFICATION FAILED: Could not read back file: {e}")
+            
+            logger.info(f"STEP 3: Restarting Xray service: {self.xray_service_name}...")
             
             # In production, use:
+            logger.info(f"STEP 4: Executing systemctl restart xray...")
             await asyncio.create_subprocess_shell(f"sudo systemctl restart {self.xray_service_name}")
+            logger.info(f"STEP 5: Xray restart command completed (async)")
             
             self.current_key = key
             return True
