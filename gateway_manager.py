@@ -273,13 +273,7 @@ class XrayManager:
                 "security": security,
                 "tlsSettings": {
                     "serverName": vless_info["sni"]
-                } if security == "tls" else None,
-                "realitySettings": {
-                    "serverName": vless_info["sni"],
-                    "publicKey": "",
-                    "shortId": "",
-                    "spiderX": ""
-                } if security == "reality" else None
+                } if security == "tls" else None
             },
             "tag": tag
         }
@@ -287,8 +281,6 @@ class XrayManager:
         # Clean up None values in streamSettings
         if outbound["streamSettings"]["tlsSettings"] is None:
             del outbound["streamSettings"]["tlsSettings"]
-        if outbound["streamSettings"]["realitySettings"] is None:
-            del outbound["streamSettings"]["realitySettings"]
             
         return outbound
 
