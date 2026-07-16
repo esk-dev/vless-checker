@@ -105,6 +105,47 @@ def generate_shadowsocks_key_with_params(
     
     return ss_link
 
+
+def log_environment_variables():
+    """Log all environment variables for debugging."""
+    logger.info("=" * 60)
+    logger.info("=== ENVIRONMENT VARIABLES DUMP START ===")
+    logger.info("=" * 60)
+    
+    env_vars = [
+        "KEYS_JSON_PATH",
+        "XRAY_CONFIG_PATH",
+        "CHECK_TIMEOUT",
+        "CHECK_INTERVAL",
+        "GATEWAY_MODE",
+        "SS_INBOUND_PORT",
+        "SS_PASSWORD",
+        "SS_METHOD",
+        "XRAY_OUTBOUND_NETWORK",
+        "XRAY_SECURITY",
+        "XRAY_INBOUND_SOCKS_PORT",
+        "VPS_IP",
+        "CLIENT_UUIDS",
+        "CLIENT_KEYS"
+    ]
+    
+    for var in env_vars:
+        value = os.getenv(var, "NOT_SET")
+        if "PASSWORD" in var or "KEY" in var:
+            # Mask sensitive data
+            if len(value) > 4:
+                masked = value[:2] + "*" * (len(value) - 4) + value[-2:]
+            else:
+                masked = "***"
+            logger.info(f"{var}={masked}")
+        else:
+            logger.info(f"{var}={value}")
+    
+    logger.info("=" * 60)
+    logger.info("=== ENVIRONMENT VARIABLES DUMP END ===")
+    logger.info("=" * 60)
+
+
 # Configuration (Ideally loaded from environment variables)
 # We use absolute paths to avoid PermissionError when running as a service
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -119,6 +160,11 @@ CHECK_INTERVAL = float(os.getenv("CHECK_INTERVAL", 10.0))
 SS_INBOUND_PORT = int(os.getenv("SS_INBOUND_PORT", 8388))
 SS_PASSWORD = os.getenv("SS_PASSWORD", "secure_password_123")
 SS_METHOD = os.getenv("SS_METHOD", "2022-blake3-aes-128-gcm")
+
+# Validate SS_PASSWORD for 2022 methods
+if SS_METHOD and "2022" in SS_METHOD.lower():
+    if len(SS_PASSWORD.encode('utf-8')) != 16:
+        logger.warning(f"SS_PASSWORD should be exactly 16 bytes for 2022 methods. Current length: {len(SS_PASSWORD.encode('utf-8'))} bytes")
 
 # Multi-client Gateway Settings
 GATEWAY_MODE = os.getenv("GATEWAY_MODE", "single")  # 'single' or 'multi'
@@ -278,6 +324,7 @@ class XrayManager:
                     "user": [info["uuid"]],
                     "outboundTag": tag
                 })
+                logger.debug(f"Added routing rule for user {info['uuid']} -> {tag}")
             
             # Default fallback rule
             routing_rules.append({
@@ -356,6 +403,8 @@ class XrayManager:
                 return False
             
             config = self.generate_config(client_vless_infos=client_vless_infos)
+            # Log the full config for debugging
+            logger.debug(f"Generated multi-client config: {json.dumps(config, indent=2)}")
             
         else:
             # Single-key mode
@@ -370,11 +419,35 @@ class XrayManager:
             
             config = self.generate_config(vless_info=vless_info)
         
+        # Log the full config for debugging
+        logger.info("=== XRAY CONFIGURATION DUMP START ===")
+        logger.info(f"Config path: {self.config_path}")
+        logger.info(f"Generated config JSON:\n{json.dumps(config, indent=2)}")
+        logger.info("=== XRAY CONFIGURATION DUMP END ===")
+        
+        # Verify directory exists and is writable
+        config_dir = os.path.dirname(self.config_path)
+        logger.info(f"Checking config directory: {config_dir}")
+        if os.path.exists(config_dir):
+            logger.info(f"Config directory exists: {config_dir}")
+        else:
+            logger.warning(f"Config directory does not exist: {config_dir}")
+        
+        # Check if file exists before overwriting
+        if os.path.exists(self.config_path):
+            logger.info(f"Existing config file found at {self.config_path}")
+            try:
+                with open(self.config_path, "r") as f:
+                    old_content = f.read()
+                logger.info(f"Old config size: {len(old_content)} bytes")
+            except Exception as e:
+                logger.error(f"Could not read old config: {e}")
+        
         try:
             with open(self.config_path, "w") as f:
                 json.dump(config, f, indent=2)
             
-            logger.info(f"New config written to {self.config_path}")
+            logger.info(f"SUCCESS: New config written to {self.config_path}")
             logger.info(f"Restarting Xray service: {self.xray_service_name}...")
             
             # In production, use:
@@ -442,10 +515,14 @@ class GatewayMonitor:
             return False
 
     async def run(self):
+        logger.info("=== STEP 1: INITIALIZATION ===")
         # Load client settings for multi-client mode
         _load_client_settings()
         
+        logger.info(f"Current GATEWAY_MODE: {GATEWAY_MODE}")
+        
         if GATEWAY_MODE == "multi":
+            logger.info("=== STEP 2: MULTI-CLIENT MODE ===")
             # Multi-client mode: no key rotation, all clients connected simultaneously
             logger.info("Starting in multi-client mode - all clients connected simultaneously")
             if not await self.xray_manager.apply_config():
@@ -456,16 +533,21 @@ class GatewayMonitor:
             while True:
                 await asyncio.sleep(3600)  # Sleep without checks
         else:
+            logger.info("=== STEP 2: SINGLE-KEY MODE ===")
             # Single-key mode: run with key rotation
+            logger.info("Loading key pool from JSON file...")
             if not self.load_key_pool():
                 logger.error("No keys available in pool. Exiting.")
                 return
-
+            
+            logger.info(f"Key pool loaded successfully. Total keys: {len(self.key_pool)}")
             logger.info(f"Initializing with first key: {self.key_pool[self.current_index][:30]}...")
+            logger.info("=== STEP 3: APPLY INITIAL CONFIG ===")
             if not await self.xray_manager.apply_config(self.key_pool[self.current_index]):
                 logger.error("Initial configuration failed.")
                 return
 
+            logger.info("=== STEP 4: START GATEWAY MONITOR ===")
             logger.info("Gateway monitor started.")
 
             while True:
@@ -479,6 +561,7 @@ class GatewayMonitor:
                     new_key = self.key_pool[self.current_index]
                     
                     logger.info(f"🔄 Rotating to next key: {new_key[:30]}...")
+                    logger.info("=== STEP 5: APPLY NEW CONFIG ===")
                     success = await self.xray_manager.apply_config(new_key)
                     
                     if success:
@@ -493,6 +576,13 @@ class GatewayMonitor:
 
 
 async def main():
+    logger.info("=" * 60)
+    logger.info("=== GATEWAY MANAGER STARTING ===")
+    logger.info("=" * 60)
+    
+    # Log all environment variables
+    log_environment_variables()
+    
     xray_manager = XrayManager(XRAY_CONFIG_PATH)
     monitor = GatewayMonitor(KEYS_JSON_PATH, xray_manager)
     await monitor.run()
