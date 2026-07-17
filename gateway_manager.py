@@ -269,15 +269,19 @@ class XrayManager:
         outbound = {
             "protocol": vless_info["type"],
             "settings": {
-                "vless": {
-                    "users": [
-                        {
-                            "id": vless_info["uuid"] if client_uuid is None else client_uuid,
-                            "encryption": vless_info["encryption"],
-                            "flow": flow
-                        }
-                    ]
-                }
+                "vnext": [
+                    {
+                        "address": vless_info["address"],
+                        "port": vless_info["port"],
+                        "users": [
+                            {
+                                "id": vless_info["uuid"] if client_uuid is None else client_uuid,
+                                "encryption": vless_info["encryption"],
+                                "flow": flow
+                            }
+                        ]
+                    }
+                ]
             },
             "streamSettings": {
                 "network": XRAY_OUTBOUND_NETWORK,
