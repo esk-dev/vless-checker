@@ -292,14 +292,13 @@ class XrayManager:
                 "serverName": vless_info["sni"]
             }
         elif security == "reality":
-            # REALITY requires realitySettings in Xray v26
-            # But since VLESS key doesn't provide publicKey/shortId, we can't configure it
-            # This will fail if the server requires REALITY settings
+            # Use REALITY settings from parsed VLESS key
+            reality_settings = vless_info.get("realitySettings", {})
             outbound["streamSettings"]["realitySettings"] = {
-                "serverName": vless_info["sni"],
-                "publicKey": "",
-                "shortId": "",
-                "spiderX": ""
+                "serverName": reality_settings.get("serverName", vless_info["sni"]),
+                "publicKey": reality_settings.get("publicKey", ""),
+                "shortId": reality_settings.get("shortId", ""),
+                "spiderX": reality_settings.get("spiderX", "")
             }
         
         # Clean up None values in streamSettings
