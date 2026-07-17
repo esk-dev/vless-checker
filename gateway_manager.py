@@ -391,6 +391,29 @@ class XrayManager:
             }
         ])
         
+        # Build routing rules - direct rules MUST come before proxy rules!
+        direct_rules = [
+            #ru-domains - direct
+            {
+                "type": "field",
+                "domain": ["geosite:ru"],
+                "outboundTag": "direct"
+            },
+            #ru-IPs - direct
+            {
+                "type": "field",
+                "ip": ["geoip:ru"],
+                "outboundTag": "direct"
+            },
+            #Blocked sites - direct (block or direct)
+            {
+                "type": "field",
+                "domain": ["geosite:ru-blocked"],
+                "outboundTag": "direct"
+            }
+        ]
+        
+        # Add blocked outbound for truly blocked sites if needed
         config = {
             "log": {
                 "loglevel": "warning"
@@ -399,18 +422,8 @@ class XrayManager:
             "outbounds": outbounds,
             "routing": {
                 "domainStrategy": "IPIfNonMatch",
-                "rules": routing_rules + [
-                    {
-                        "type": "field",
-                        "domain": ["geosite:ru-blocked"],
-                        "outboundTag": "direct"
-                    },
-                    {
-                        "type": "field",
-                        "ip": ["geoip:ru-blocked"],
-                        "outboundTag": "direct"
-                    }
-                ]
+                "implicitIPSetMatch": True,
+                "rules": direct_rules + routing_rules
             }
         }
         
