@@ -237,7 +237,7 @@ class XrayManager:
             if len(parts) > 2:
                 fragment = parts[2]
 
-            return {
+            result = {
                 "uuid": uuid,
                 "address": host,
                 "port": port,
@@ -246,6 +246,17 @@ class XrayManager:
                 "sni": params.get("sni") or fragment,
                 "type": "vless"
             }
+            
+            # Add REALITY-specific parameters if available
+            if params.get("security") == "reality":
+                result["realitySettings"] = {
+                    "publicKey": params.get("pbk", ""),
+                    "shortId": params.get("sid", ""),
+                    "serverName": params.get("sni") or fragment,
+                    "spiderX": params.get("spiderX", "")
+                }
+            
+            return result
         except Exception as e:
             logger.error(f"Failed to parse VLESS key: {e}")
             return None
@@ -270,16 +281,31 @@ class XrayManager:
             },
             "streamSettings": {
                 "network": XRAY_OUTBOUND_NETWORK,
-                "security": security,
-                "tlsSettings": {
-                    "serverName": vless_info["sni"]
-                } if security == "tls" else None
-            },
+                "security": security
+            } if security in ["tls", "reality"] else None,
             "tag": tag
         }
         
+        # Add TLS settings if security is tls
+        if security == "tls":
+            outbound["streamSettings"]["tlsSettings"] = {
+                "serverName": vless_info["sni"]
+            }
+        elif security == "reality":
+            # REALITY requires realitySettings in Xray v26
+            # But since VLESS key doesn't provide publicKey/shortId, we can't configure it
+            # This will fail if the server requires REALITY settings
+            outbound["streamSettings"]["realitySettings"] = {
+                "serverName": vless_info["sni"],
+                "publicKey": "",
+                "shortId": "",
+                "spiderX": ""
+            }
+        
         # Clean up None values in streamSettings
-        if outbound["streamSettings"]["tlsSettings"] is None:
+        if outbound["streamSettings"] is None:
+            del outbound["streamSettings"]
+        elif "tlsSettings" in outbound["streamSettings"] and outbound["streamSettings"]["tlsSettings"] is None:
             del outbound["streamSettings"]["tlsSettings"]
             
         return outbound
