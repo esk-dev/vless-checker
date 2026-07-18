@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import re
 import requests
 import socket
 import time
@@ -78,12 +79,23 @@ def fetch_keys(url):
         sys.exit(1)
 
 
+import re
+
 def parse_host_port(key):
+    """Parse VLESS key to extract host and port, handling both IPv4 and IPv6."""
     try:
         without_scheme = key[len("vless://"):]
         at_idx = without_scheme.rfind("@")
         after_at = without_scheme[at_idx + 1:]
         host_port = after_at.split("?")[0].split("#")[0]
+        
+        # Handle IPv6 format: [2001:db8::1]:443
+        if host_port.startswith("["):
+            match = re.match(r'\[([^\]]+)\]:(\d+)$', host_port)
+            if match:
+                return match.group(1), int(match.group(2))
+        
+        # Handle IPv4 format or plain hostname: port
         if ":" in host_port:
             host, port = host_port.rsplit(":", 1)
             return host.strip("[]"), int(port)

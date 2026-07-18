@@ -142,7 +142,7 @@ sudo systemctl enable --now vless-checker.timer
 | `XRAY_CONFIG_PATH` | Путь к генерируемому конфигу Xray | `/usr/local/etc/xray/config.json` |
 | `CHECK_TIMEOUT` | Таймаут проверки узла (сек) | `5.0` |
 | `CHECK_INTERVAL` | Интервал проверки (сек) | `10.0` |
-| `SS_INBOUND_PORT` | Порт для Shadowsocks-2022 | `8388` |
+| `SS_INBOUND_PORT` | Порт для Shadowsocks-2022 | `8388` (изменено с 8338) |
 | `SS_PASSWORD` | Пароль для Shadowsocks-2022 | `secure_password_123` |
 | `SS_METHOD` | Метод шифрования SS | `2022-blake3-aes-128-gcm` |
 | `GATEWAY_MODE` | Режим работы: `single` или `multi` | `single` |

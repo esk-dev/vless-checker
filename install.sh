@@ -74,6 +74,73 @@ setup_env() {
     # We use | as delimiter in case the password contains /
     sed -i "s|SS_PASSWORD=.*|SS_PASSWORD=$SS_PASSWORD|" .env
     log "Password updated in .env."
+
+    # Get VPS IP address
+    if grep -q "VPS_IP=YOUR_VPS_IP_ADDRESS" .env; then
+        log "Getting public IP address..."
+        PUBLIC_IP=$(curl -s ifconfig.me 2>/dev/null || echo "")
+        if [ -n "$PUBLIC_IP" ]; then
+            log "Public IP detected: $PUBLIC_IP"
+            read -p "Use this IP? (Y/n): " USE_PUBLIC_IP
+            USE_PUBLIC_IP=${USE_PUBLIC_IP:-Y}
+            if [[ "$USE_PUBLIC_IP" =~ ^[Yy]$ ]]; then
+                sed -i "s|VPS_IP=.*|VPS_IP=$PUBLIC_IP|" .env
+                log "VPS_IP updated to $PUBLIC_IP"
+            else
+                read -p "Enter your VPS IP address: " USER_IP
+                if [ -n "$USER_IP" ]; then
+                    sed -i "s|VPS_IP=.*|VPS_IP=$USER_IP|" .env
+                    log "VPS_IP updated to $USER_IP"
+                fi
+            fi
+        else
+            warn "Could not detect public IP automatically."
+            read -p "Enter your VPS IP address: " USER_IP
+            if [ -n "$USER_IP" ]; then
+                sed -i "s|VPS_IP=.*|VPS_IP=$USER_IP|" .env
+                log "VPS_IP updated to $USER_IP"
+            fi
+        fi
+    fi
+
+    # Check GATEWAY_MODE for multi-client setup
+    GATEWAY_MODE=$(grep "^GATEWAY_MODE=" .env | cut -d'=' -f2)
+    if [ "$GATEWAY_MODE" = "multi" ]; then
+        log "Multi-client mode detected. Please configure CLIENT_UUIDS and CLIENT_KEYS."
+        
+        # Generate UUIDs for clients
+        read -p "How many clients? " CLIENT_COUNT
+        CLIENT_COUNT=${CLIENT_COUNT:-1}
+        
+        UUIDS=""
+        for ((i=1; i<=CLIENT_COUNT; i++)); do
+            UUID=$(python3 -c "import uuid; print(uuid.uuid4())")
+            if [ -n "$UUIDS" ]; then
+                UUIDS="$UUIDS,$UUID"
+            else
+                UUIDS="$UUID"
+            fi
+        done
+        sed -i "s|CLIENT_UUIDS=.*|CLIENT_UUIDS=$UUIDS|" .env
+        log "Generated $CLIENT_COUNT UUIDs for clients."
+
+        # Get VLESS keys for each client
+        KEYS=""
+        for ((i=1; i<=CLIENT_COUNT; i++)); do
+            read -p "Enter VLESS key for client $i: " CLIENT_KEY
+            if [ -n "$CLIENT_KEY" ]; then
+                if [ -n "$KEYS" ]; then
+                    KEYS="$KEYS,$CLIENT_KEY"
+                else
+                    KEYS="$CLIENT_KEY"
+                fi
+            fi
+        done
+        if [ -n "$KEYS" ]; then
+            sed -i "s|CLIENT_KEYS=.*|CLIENT_KEYS=$KEYS|" .env
+            log "Updated CLIENT_KEYS with $CLIENT_COUNT entries."
+        fi
+    fi
 }
 
 setup_services() {
@@ -103,7 +170,7 @@ setup_services() {
     
     # Generate Outline Shadowsocks key
     log "Generating Outline Shadowsocks key..."
-    /usr/bin/python3 /home/developer/vless-checker/gateway_manager.py --gen-ss
+    /usr/bin/python3 $PROJECT_DIR/gateway_manager.py --gen-ss
 }
 
 verify_installation() {

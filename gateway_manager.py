@@ -57,7 +57,8 @@ def generate_shadowsocks_key(ss_method: str = None, ss_password: str = None) -> 
     vps_ip = os.getenv("VPS_IP", "YOUR_VPS_IP_ADDRESS")
     
     # Port for Shadowsocks (from environment or default)
-    ss_port = int(os.getenv("SS_INBOUND_PORT", 8338))
+    # Use default from SS_INBOUND_PORT or 8388 as fallback
+    ss_port = int(os.getenv("SS_INBOUND_PORT", 8388))
     
     # Create the shareable link
     ss_link = f"ss://{encoded_auth}@{vps_ip}:{ss_port}#MyVLESSRotator"
@@ -138,7 +139,13 @@ def log_environment_variables():
         if "PASSWORD" in var or "KEY" in var:
             # Mask sensitive data
             if len(value) > 4:
-                masked = value[:2] + "*" * (len(value) - 4) + value[-2:]
+                # Fix mask for short values
+                if len(value) > 4:
+                    masked = value[:2] + "*" * (len(value) - 4) + value[-2:]
+                elif len(value) > 0:
+                    masked = "*" * len(value)
+                else:
+                    masked = "***"
             else:
                 masked = "***"
             logger.info(f"{var}={masked}")
@@ -162,7 +169,7 @@ CHECK_INTERVAL = float(os.getenv("CHECK_INTERVAL", 10.0))
 
 # Shadowsocks Settings for Inbound
 SS_INBOUND_PORT = int(os.getenv("SS_INBOUND_PORT", 8388))
-SS_PASSWORD = os.getenv("SS_PASSWORD", "secure_password_123")
+SS_PASSWORD = os.getenv("SS_PASSWORD", "your_secure_password_here")
 SS_METHOD = os.getenv("SS_METHOD", "2022-blake3-aes-128-gcm")
 
 # Validate SS_PASSWORD for 2022 methods
@@ -218,22 +225,49 @@ class XrayManager:
         self.current_key = None
 
     def parse_vless_key(self, key):
-        """Parses a VLESS key into a dictionary for Xray outbound configuration."""
+        """Parses a VLESS key into a dictionary for Xray outbound configuration.
+        
+        Args:
+            key: VLESS key string in format: vless://UUID@HOST:PORT?PARAMS#TAG
+            
+        Returns:
+            Dict with parsed VLESS info or None if parsing fails
+        """
         try:
+            if not key or not key.startswith("vless://"):
+                logger.error("Invalid VLESS key: must start with 'vless://'")
+                return None
+            
             content = key[len("vless://"):]
             if "@" not in content:
+                logger.error("Invalid VLESS key: missing '@' separator")
                 return None
             
             uuid, remainder = content.split("@", 1)
             parts = re.split(r'[?#]', remainder)
             host_port = parts[0]
             
-            if ":" in host_port:
+            # Handle IPv6 addresses in brackets
+            if host_port.startswith("["):
+                # IPv6 format: [2001:db8::1]:443
+                match = re.match(r'\[([^\]]+)\]:(\d+)$', host_port)
+                if match:
+                    host = match.group(1)
+                    port = int(match.group(2))
+                else:
+                    logger.error("Invalid IPv6 address format")
+                    return None
+            elif ":" in host_port:
                 host, port = host_port.rsplit(":", 1)
                 port = int(port)
             else:
                 host = host_port
                 port = 443
+            
+            # Validate port range
+            if port < 1 or port > 65535:
+                logger.error(f"Invalid port: {port}")
+                return None
             
             params = {}
             if len(parts) > 1:
@@ -267,10 +301,44 @@ class XrayManager:
                 }
             
             return result
+        except ValueError as e:
+            logger.error(f"Failed to parse VLESS key: {e}")
+            return None
         except Exception as e:
             logger.error(f"Failed to parse VLESS key: {e}")
             return None
 
+    def _build_stream_settings(self, vless_info):
+        """Build stream settings for VLESS outbound.
+        
+        Args:
+            vless_info: Parsed VLESS key information
+            
+        Returns:
+            Stream settings dict or None if no security
+        """
+        security = vless_info["security"]
+        
+        stream_settings = {
+            "network": XRAY_OUTBOUND_NETWORK,
+            "security": security
+        } if security in ["tls", "reality"] else None
+        
+        if security == "tls":
+            stream_settings["tlsSettings"] = {
+                "serverName": vless_info["sni"]
+            }
+        elif security == "reality":
+            reality_settings = vless_info.get("realitySettings", {})
+            stream_settings["realitySettings"] = {
+                "serverName": reality_settings.get("serverName", vless_info["sni"]),
+                "publicKey": reality_settings.get("publicKey", ""),
+                "shortId": reality_settings.get("shortId", ""),
+                "spiderX": reality_settings.get("spiderX", "")
+            }
+        
+        return stream_settings
+    
     def _build_vless_outbound(self, vless_info, tag, client_uuid=None, is_chain=False):
         """Build a single VLESS outbound configuration.
         
@@ -280,8 +348,9 @@ class XrayManager:
             client_uuid: Optional client UUID for multi-client mode
             is_chain: If True, mark this as a chain outbound for explicit routing
         """
-        security = vless_info["security"]
         flow = vless_info.get("flow", "")
+        
+        stream_settings = self._build_stream_settings(vless_info)
         
         outbound = {
             "protocol": vless_info["type"],
@@ -300,34 +369,10 @@ class XrayManager:
                     }
                 ]
             },
-            "streamSettings": {
-                "network": XRAY_OUTBOUND_NETWORK,
-                "security": security
-            } if security in ["tls", "reality"] else None,
+            "streamSettings": stream_settings,
             "tag": tag
         }
         
-        # Add TLS settings if security is tls
-        if security == "tls":
-            outbound["streamSettings"]["tlsSettings"] = {
-                "serverName": vless_info["sni"]
-            }
-        elif security == "reality":
-            # Use REALITY settings from parsed VLESS key
-            reality_settings = vless_info.get("realitySettings", {})
-            outbound["streamSettings"]["realitySettings"] = {
-                "serverName": reality_settings.get("serverName", vless_info["sni"]),
-                "publicKey": reality_settings.get("publicKey", ""),
-                "shortId": reality_settings.get("shortId", ""),
-                "spiderX": reality_settings.get("spiderX", "")
-            }
-        
-        # Clean up None values in streamSettings
-        if outbound["streamSettings"] is None:
-            del outbound["streamSettings"]
-        elif "tlsSettings" in outbound["streamSettings"] and outbound["streamSettings"]["tlsSettings"] is None:
-            del outbound["streamSettings"]["tlsSettings"]
-            
         return outbound
     
     def _build_chain_vless_outbound(self, chain_key):
@@ -347,6 +392,8 @@ class XrayManager:
             logger.error("Failed to parse chain VLESS key")
             return None
         
+        stream_settings = self._build_stream_settings(vless_info)
+        
         outbound = {
             "protocol": vless_info["type"],
             "settings": {
@@ -362,34 +409,10 @@ class XrayManager:
                     }
                 ]
             },
-            "streamSettings": {
-                "network": XRAY_OUTBOUND_NETWORK,
-                "security": vless_info["security"]
-            } if vless_info["security"] in ["tls", "reality"] else None,
+            "streamSettings": stream_settings,
             "tag": CHAIN_OUTBOUND_TAG
         }
         
-        # Add TLS settings if security is tls
-        if vless_info["security"] == "tls":
-            outbound["streamSettings"]["tlsSettings"] = {
-                "serverName": vless_info["sni"]
-            }
-        elif vless_info["security"] == "reality":
-            # Use REALITY settings from parsed VLESS key
-            reality_settings = vless_info.get("realitySettings", {})
-            outbound["streamSettings"]["realitySettings"] = {
-                "serverName": reality_settings.get("serverName", vless_info["sni"]),
-                "publicKey": reality_settings.get("publicKey", ""),
-                "shortId": reality_settings.get("shortId", ""),
-                "spiderX": reality_settings.get("spiderX", "")
-            }
-        
-        # Clean up None values in streamSettings
-        if outbound["streamSettings"] is None:
-            del outbound["streamSettings"]
-        elif "tlsSettings" in outbound["streamSettings"] and outbound["streamSettings"]["tlsSettings"] is None:
-            del outbound["streamSettings"]["tlsSettings"]
-            
         logger.info(f"Built chain VLESS outbound: {CHAIN_OUTBOUND_TAG} -> {vless_info['address']}:{vless_info['port']}")
         return outbound
 
@@ -401,6 +424,7 @@ class XrayManager:
             {
                 "port": XRAY_INBOUND_SOCKS_PORT,
                 "protocol": "socks",
+                "tag": "socks-in",
                 "settings": {
                     "auth": "noauth",
                     "udp": True
@@ -413,6 +437,7 @@ class XrayManager:
             {
                 "port": SS_INBOUND_PORT,
                 "protocol": "shadowsocks",
+                "tag": "shadowsocks-in",
                 "settings": {
                     "method": SS_METHOD,
                     "password": SS_PASSWORD
@@ -459,7 +484,7 @@ class XrayManager:
                     # Add routing rule: all traffic goes to chain VLESS
                     routing_rules.append({
                         "type": "field",
-                        "inboundTag": ["vless-in", "shadowsocks-in"],
+                        "inboundTag": ["socks-in", "shadowsocks-in"],
                         "outboundTag": CHAIN_OUTBOUND_TAG
                     })
                     logger.info(f"Chain VLESS routing enabled: all traffic -> {CHAIN_OUTBOUND_TAG}")
@@ -569,6 +594,10 @@ class XrayManager:
     async def apply_config(self, key=None):
         """Apply Xray configuration. For multi-client mode, key is ignored."""
         if GATEWAY_MODE == "multi":
+            if not CLIENT_KEYS:
+                logger.error("CLIENT_KEYS is empty for multi-client mode.")
+                return False
+            
             client_vless_infos = {}
             
             # Build vless info for each client
@@ -753,6 +782,9 @@ class GatewayMonitor:
             logger.info("Gateway monitor started.")
 
             while True:
+                if not self.key_pool:
+                    logger.error("Key pool is empty. Exiting.")
+                    return
                 current_key = self.key_pool[self.current_index]
                 is_alive = await self.check_connection(current_key)
 
@@ -769,7 +801,8 @@ class GatewayMonitor:
                     if success:
                         logger.info("✅ Rotation successful.")
                     else:
-                        logger.error("❌ Rotation failed! Trying next key immediately...")
+                        logger.error("❌ Rotation failed! Retrying with backoff...")
+                        await asyncio.sleep(1)  # Small delay before retrying
                         continue
                 else:
                     logger.info(f"🟢 Connection healthy. Node: {self.xray_manager.parse_vless_key(current_key)['address']}")
@@ -863,6 +896,19 @@ def handle_cli_args():
 
 
 if __name__ == "__main__":
+    import signal
+    
+    # Graceful shutdown handler
+    shutdown_event = asyncio.Event()
+    
+    def signal_handler(sig, frame):
+        logger.info(f"Received signal {sig}, shutting down...")
+        shutdown_event.set()
+    
+    # Register signal handlers for SIGINT and SIGTERM
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
     # Handle CLI arguments first
     cli_result = handle_cli_args()
     
@@ -877,3 +923,5 @@ if __name__ == "__main__":
         logger.info("Gateway monitor stopped by user.")
     except Exception as e:
         logger.critical(f"Gateway monitor crashed: {e}")
+    finally:
+        logger.info("Gateway monitor shutdown complete.")
