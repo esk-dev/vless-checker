@@ -126,7 +126,11 @@ def log_environment_variables():
         "XRAY_INBOUND_SOCKS_PORT",
         "VPS_IP",
         "CLIENT_UUIDS",
-        "CLIENT_KEYS"
+        "CLIENT_KEYS",
+        "ENABLE_IPV6_BLOCK",
+        "WARP_SOCKS_PORT",
+        "WARP_DOMAINS",
+        "CHAIN_OUTBOUND_TAG"
     ]
     
     for var in env_vars:
@@ -175,6 +179,12 @@ XRAY_INBOUND_SOCKS_PORT = int(os.getenv("XRAY_INBOUND_SOCKS_PORT", 1080))
 # Client-specific settings (parsed from comma-separated values)
 CLIENT_UUIDS = []
 CLIENT_KEYS = []
+
+# IPv6 and Chain Configuration
+ENABLE_IPV6_BLOCK = os.getenv("ENABLE_IPV6_BLOCK", "true").lower() == "true"
+WARP_SOCKS_PORT = int(os.getenv("WARP_SOCKS_PORT", 40000))
+WARP_DOMAINS = _parse_comma_separated_env("WARP_DOMAINS", ["openai.com", "chatgpt.com", "ai.com"])
+CHAIN_OUTBOUND_TAG = os.getenv("CHAIN_OUTBOUND_TAG", "chain-vless-out")
 
 
 def _parse_comma_separated_env(env_name, default=None):
@@ -261,8 +271,15 @@ class XrayManager:
             logger.error(f"Failed to parse VLESS key: {e}")
             return None
 
-    def _build_vless_outbound(self, vless_info, tag, client_uuid=None):
-        """Build a single VLESS outbound configuration."""
+    def _build_vless_outbound(self, vless_info, tag, client_uuid=None, is_chain=False):
+        """Build a single VLESS outbound configuration.
+        
+        Args:
+            vless_info: Parsed VLESS key information
+            tag: Tag for the outbound
+            client_uuid: Optional client UUID for multi-client mode
+            is_chain: If True, mark this as a chain outbound for explicit routing
+        """
         security = vless_info["security"]
         flow = vless_info.get("flow", "")
         
@@ -311,6 +328,69 @@ class XrayManager:
         elif "tlsSettings" in outbound["streamSettings"] and outbound["streamSettings"]["tlsSettings"] is None:
             del outbound["streamSettings"]["tlsSettings"]
             
+        return outbound
+    
+    def _build_chain_vless_outbound(self, chain_key):
+        """Build a chain VLESS outbound configuration for explicit routing.
+        
+        This creates an outbound that can be explicitly routed via routing rules
+        to prevent IP leaks in chain configurations (Client -> VPS -> Second VLESS).
+        
+        Args:
+            chain_key: The VLESS key for the second hop in the chain
+            
+        Returns:
+            Outbound configuration dict or None if parsing fails
+        """
+        vless_info = self.parse_vless_key(chain_key)
+        if not vless_info:
+            logger.error("Failed to parse chain VLESS key")
+            return None
+        
+        outbound = {
+            "protocol": vless_info["type"],
+            "settings": {
+                "vnext": [
+                    {
+                        "address": vless_info["address"],
+                        "port": vless_info["port"],
+                        "users": [{
+                            "id": vless_info["uuid"],
+                            "encryption": vless_info["encryption"],
+                            "flow": vless_info.get("flow", "")
+                        }]
+                    }
+                ]
+            },
+            "streamSettings": {
+                "network": XRAY_OUTBOUND_NETWORK,
+                "security": vless_info["security"]
+            } if vless_info["security"] in ["tls", "reality"] else None,
+            "tag": CHAIN_OUTBOUND_TAG
+        }
+        
+        # Add TLS settings if security is tls
+        if vless_info["security"] == "tls":
+            outbound["streamSettings"]["tlsSettings"] = {
+                "serverName": vless_info["sni"]
+            }
+        elif vless_info["security"] == "reality":
+            # Use REALITY settings from parsed VLESS key
+            reality_settings = vless_info.get("realitySettings", {})
+            outbound["streamSettings"]["realitySettings"] = {
+                "serverName": reality_settings.get("serverName", vless_info["sni"]),
+                "publicKey": reality_settings.get("publicKey", ""),
+                "shortId": reality_settings.get("shortId", ""),
+                "spiderX": reality_settings.get("spiderX", "")
+            }
+        
+        # Clean up None values in streamSettings
+        if outbound["streamSettings"] is None:
+            del outbound["streamSettings"]
+        elif "tlsSettings" in outbound["streamSettings"] and outbound["streamSettings"]["tlsSettings"] is None:
+            del outbound["streamSettings"]["tlsSettings"]
+            
+        logger.info(f"Built chain VLESS outbound: {CHAIN_OUTBOUND_TAG} -> {vless_info['address']}:{vless_info['port']}")
         return outbound
 
     def generate_config(self, vless_info=None, client_vless_infos=None):
@@ -370,6 +450,20 @@ class XrayManager:
             outbound = self._build_vless_outbound(vless_info, "proxy")
             outbounds.append(outbound)
             
+            # Check for chain VLESS key in environment
+            chain_key = os.getenv("CHAIN_VLESS_KEY")
+            if chain_key:
+                chain_outbound = self._build_chain_vless_outbound(chain_key)
+                if chain_outbound:
+                    outbounds.append(chain_outbound)
+                    # Add routing rule: all traffic goes to chain VLESS
+                    routing_rules.append({
+                        "type": "field",
+                        "inboundTag": ["vless-in", "shadowsocks-in"],
+                        "outboundTag": CHAIN_OUTBOUND_TAG
+                    })
+                    logger.info(f"Chain VLESS routing enabled: all traffic -> {CHAIN_OUTBOUND_TAG}")
+            
             # Single rule for all traffic
             routing_rules.append({
                 "type": "field",
@@ -390,6 +484,20 @@ class XrayManager:
                 "tag": "blocked"
             }
         ])
+        
+        # Add WARP outbound if WARP domains are configured
+        if WARP_DOMAINS and len(WARP_DOMAINS) > 0:
+            outbounds.append({
+                "protocol": "socks",
+                "tag": "warp-proxy",
+                "settings": {
+                    "servers": [{
+                        "address": "127.0.0.1",
+                        "port": WARP_SOCKS_PORT
+                    }]
+                }
+            })
+            logger.info(f"Added WARP proxy outbound for domains: {WARP_DOMAINS}")
         
         # Build routing rules - direct rules MUST come before proxy rules!
         direct_rules = [
@@ -412,6 +520,35 @@ class XrayManager:
                 "outboundTag": "direct"
             }
         ]
+        
+        # IPv6 blocking rules - MUST come before other proxy rules!
+        if ENABLE_IPV6_BLOCK:
+            direct_rules.extend([
+                # Block IPv6 traffic via proxy - route to blocked
+                {
+                    "type": "field",
+                    "ip": ["geoip6:all"],
+                    "outboundTag": "blocked"
+                },
+                # Allow Russian IPv6 traffic to go direct
+                {
+                    "type": "field",
+                    "ip": ["geoip6:ru"],
+                    "outboundTag": "direct"
+                }
+            ])
+            logger.info("IPv6 blocking enabled - all IPv6 traffic routed to blocked")
+        else:
+            logger.info("IPv6 blocking disabled - IPv6 traffic may leak")
+        
+        # WARP routing rules - before chain/outbound rules
+        for domain in WARP_DOMAINS:
+            direct_rules.append({
+                "type": "field",
+                "domain": [f"full:{domain}"],
+                "outboundTag": "warp-proxy"
+            })
+            logger.debug(f"Added WARP routing rule for domain: {domain}")
         
         # Add blocked outbound for truly blocked sites if needed
         config = {

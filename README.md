@@ -197,6 +197,70 @@ openssl rand -base64 16
 
 ---
 
+## 🔴 Утечка IP-адреса (IP Leak) - Цепочка VLESS
+
+### Проблема утечки IP при цепочке
+
+Если вы используете **цепочку VLESS** (Клиент → VPS в Нидерландах → Второй VLESS), ваш реальный IP может утечь из-за:
+
+1. **IPv6 трафика** - Трафик по IPv6 идет в обход VPN
+2. **Некорректная маршрутизация** - Трафик сбрасывается в `freedom` вместо цепочки
+3. **DNS утечка** - DNS-запросы идут локальному провайдеру
+
+### Решение 1: Блокировка IPv6
+
+Включите блокировку IPv6 в вашем `.env` файле:
+
+```env
+ENABLE_IPV6_BLOCK=true
+```
+
+Это направит весь IPv6 трафик в черную дыру (`blackhole`), предотвращая утечку.
+
+### Решение 2: Цепочковая маршрутизация
+
+Настройте **Chain VLESS** в вашем `.env` файле:
+
+```env
+# Входящий VLESS ключ (от клиента к вашему VPS)
+CLIENT_KEYS=vless://...your_vless_key...
+
+# Цепочковый VLESS ключ (от вашего VPS к второму серверу)
+CHAIN_VLESS_KEY=vless://...your_chain_vless_key...
+CHAIN_OUTBOUND_TAG=chain-vless-out
+```
+
+Это создаст явное правило маршрутизации: весь входящий трафик направляется в цепочку.
+
+### Решение 3: Cloudflare WARP для ChatGPT
+
+Установите Cloudflare WARP на VPS и настройте прокси:
+
+```bash
+warp-cli mode proxy
+warp-cli connect
+```
+
+Затем в `.env` добавьте:
+
+```env
+WARP_SOCKS_PORT=40000
+WARP_DOMAINS=openai.com,chatgpt.com,ai.com
+```
+
+Трафик к ChatGPT будет идти через WARP, скрывая IP VPS.
+
+### Проверка утечек
+
+Проверьте свой IP на [ipleak.net](https://ipleak.net):
+
+- Если видите IPv6 - включите `ENABLE_IPV6_BLOCK=true`
+- Если видите ваш реальный IP - проверьте настройки `CHAIN_VLESS_KEY`
+
+---
+
+## 📂 Структура проекта (Project Structure)
+
 ## 📂 Структура проекта (Project Structure)
 - `gateway_manager.py` - Основной сервис ротации и мониторинга.
 - `checker.py` - Скрипт скрапинга и проверки доступности сервисов.
@@ -319,6 +383,43 @@ SS_INBOUND_PORT=8388
 SS_PASSWORD=secure_password_123
 CLIENT_KEYS=vless://4b056394-2f40-11f1-bffe-46c4782ac1a7@77.233.215.78:443?security=tls&encryption=none&flow=xtls-rprx-vision&sni=example.com
 ```
+
+### Пример 5: Chain VLESS с блокировкой IPv6
+Для настройки **цепочки VLESS** (Клиент → VPS в Нидерландах → Второй VLESS):
+
+```env
+# Входящий VLESS ключ (от клиента к вашему VPS)
+CLIENT_KEYS=vless://4b056394-2f40-11f1-bffe-46c4782ac1a7@77.233.215.78:443?security=tls&encryption=none&flow=xtls-rprx-vision&sni=example.com
+
+# Цепочковый VLESS ключ (от вашего VPS к второму серверу)
+CHAIN_VLESS_KEY=vless://58be4691-5430-417a-96e3-02736d151490@de1.linkto.sbs:443?security=tls&encryption=none&flow=xtls-rprx-vision&sni=de1.linkto.sbs
+
+# Блокировка IPv6 для предотвращения утечек
+ENABLE_IPV6_BLOCK=true
+
+# Тег outbound для цепочки
+CHAIN_OUTBOUND_TAG=chain-vless-out
+```
+
+### Пример 6: Chain VLESS с WARP для ChatGPT
+Настройка цепочки + WARP прокси для доступа к ChatGPT:
+
+```env
+# Входящий VLESS ключ
+CLIENT_KEYS=vless://4b056394-2f40-11f1-bffe-46c4782ac1a7@77.233.215.78:443?security=tls&encryption=none&flow=xtls-rprx-vision&sni=example.com
+
+# Цепочковый VLESS ключ
+CHAIN_VLESS_KEY=vless://58be4691-5430-417a-96e3-02736d151490@de1.linkto.sbs:443?security=tls&encryption=none&flow=xtls-rprx-vision&sni=de1.linkto.sbs
+
+# Блокировка IPv6
+ENABLE_IPV6_BLOCK=true
+
+# WARP прокси для ChatGPT
+WARP_SOCKS_PORT=40000
+WARP_DOMAINS=openai.com,chatgpt.com,ai.com
+```
+
+> **Важно:** WARP должен быть запущен на VPS в режиме прокси (`warp-cli mode proxy`) перед использованием.
 
 ---
 
