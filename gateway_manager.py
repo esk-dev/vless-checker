@@ -1,110 +1,78 @@
-import json
-import os
-import subprocess
+#!/usr/bin/env python3
+"""VLESS Self-Healing Gateway Manager - Main Entry Point.
+
+This module provides:
+- Main entry point for gateway monitoring
+- CLI argument handling for key generation
+- Environment variable loading
+- Signal handling for graceful shutdown
+"""
 import asyncio
-import logging
-import time
-import re
 import sys
-from datetime import datetime
-from urllib.parse import unquote
-import base64
+import signal
+import os
+import json
+from typing import Optional
 
-# Load environment variables from .env file
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    # dotenv not installed, environment variables will be loaded from system
-    pass
+from dotenv import load_dotenv
+load_dotenv()
 
-# Configure logging
-# We only use StreamHandler so that logs are captured by systemd journal
+import logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler()
-    ]
+    handlers=[logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
 
+# Import new modular components
+from config.vless import VLESSInfo, parse_vless_key
+from config.builder import XrayConfigBuilder, OutboundConfig, StreamSettings
+from config.warp import WarpConfig
+from config.ipv6 import IPv6Config
+from config.rules import RoutingRulesBuilder
+from config.ss import generate_shadowsocks_key
+from monitor.gateway import GatewayMonitor
 
-def generate_shadowsocks_key(ss_method: str = None, ss_password: str = None) -> str:
-    """
-    Generate a Shadowsocks shareable link for Outline clients.
+
+# Configuration loaded from environment
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+KEYS_JSON_PATH = os.getenv("KEYS_JSON_PATH", os.path.join(BASE_DIR, "docs/keys.json"))
+XRAY_CONFIG_PATH = os.getenv("XRAY_CONFIG_PATH", "/usr/local/etc/xray/config.json")
+CHECK_TIMEOUT = float(os.getenv("CHECK_TIMEOUT", "5.0"))
+CHECK_INTERVAL = float(os.getenv("CHECK_INTERVAL", "10.0"))
+SS_INBOUND_PORT = int(os.getenv("SS_INBOUND_PORT", "8388"))
+SS_PASSWORD = os.getenv("SS_PASSWORD", "your_secure_password_here")
+SS_METHOD = os.getenv("SS_METHOD", "2022-blake3-aes-128-gcm")
+GATEWAY_MODE = os.getenv("GATEWAY_MODE", "single")
+
+# Multi-client settings
+CLIENT_UUIDS = []
+CLIENT_KEYS = []
+
+
+def _parse_comma_separated_env(env_name, default=None):
+    """Parse a comma-separated environment variable into a list."""
+    value = os.getenv(env_name, "")
+    if not value:
+        return default if default else []
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _load_client_settings():
+    """Load client UUIDs and keys from environment variables."""
+    global CLIENT_UUIDS, CLIENT_KEYS
     
-    Format: ss://[BASE64(method:password)]@[IP]:PORT#TAG
-    
-    Args:
-        ss_method: Encryption method (e.g., 'aes-256-gcm', '2022-blake3-aes-128-gcm')
-        ss_password: Password for the Shadowsocks connection
+    if GATEWAY_MODE == "multi":
+        CLIENT_UUIDS = _parse_comma_separated_env("CLIENT_UUIDS")
+        CLIENT_KEYS = _parse_comma_separated_env("CLIENT_KEYS")
         
-    Returns:
-        A shareable Shadowsocks URL for Outline clients
-    """
-    method = ss_method or SS_METHOD
-    password = ss_password or SS_PASSWORD
-    
-    # Combine method and password with colon
-    auth_string = f"{method}:{password}"
-    
-    # Encode to Base64
-    encoded_auth = base64.b64encode(auth_string.encode('utf-8')).decode('utf-8')
-    
-    # Get VPS IP from environment or use placeholder
-    # In production, this would be the server's public IP
-    vps_ip = os.getenv("VPS_IP", "YOUR_VPS_IP_ADDRESS")
-    
-    # Port for Shadowsocks (from environment or default)
-    # Use default from SS_INBOUND_PORT or 8388 as fallback
-    ss_port = int(os.getenv("SS_INBOUND_PORT", 8388))
-    
-    # Create the shareable link
-    ss_link = f"ss://{encoded_auth}@{vps_ip}:{ss_port}#MyVLESSRotator"
-    
-    logger.info(f"Generated Shadowsocks key: {ss_link[:30]}...")
-    
-    return ss_link
-
-
-def generate_shadowsocks_key_with_params(
-    ss_method: str = None,
-    ss_password: str = None,
-    vps_ip: str = None,
-    ss_port: int = None
-) -> str:
-    """
-    Generate a Shadowsocks shareable link for Outline clients with custom parameters.
-    
-    Format: ss://[BASE64(method:password)]@[IP]:PORT#TAG
-    
-    Args:
-        ss_method: Encryption method (e.g., 'aes-256-gcm', '2022-blake3-aes-128-gcm')
-        ss_password: Password for the Shadowsocks connection
-        vps_ip: IP address of your VPS/server
-        ss_port: Port for the Shadowsocks service (default: 8338)
+        if len(CLIENT_UUIDS) != len(CLIENT_KEYS):
+            logger.warning(f"UUID count ({len(CLIENT_UUIDS)}) != Key count ({len(CLIENT_KEYS)})")
         
-    Returns:
-        A shareable Shadowsocks URL for Outline clients
-    """
-    method = ss_method or SS_METHOD
-    password = ss_password or SS_PASSWORD
-    ip = vps_ip or os.getenv("VPS_IP", "YOUR_VPS_IP_ADDRESS")
-    port = ss_port or int(os.getenv("SS_INBOUND_PORT", 8388))
-    
-    # Combine method and password with colon
-    auth_string = f"{method}:{password}"
-    
-    # Encode to Base64
-    encoded_auth = base64.b64encode(auth_string.encode('utf-8')).decode('utf-8')
-    
-    # Create the shareable link
-    ss_link = f"ss://{encoded_auth}@{ip}:{port}#MyVLESSRotator"
-    
-    logger.info(f"Generated Shadowsocks key with params")
-    
-    return ss_link
+        logger.info(f"Loaded {len(CLIENT_UUIDS)} client(s) for multi-client mode")
+    else:
+        logger.info("Running in single-key mode")
 
 
 def log_environment_variables():
@@ -139,13 +107,9 @@ def log_environment_variables():
         if "PASSWORD" in var or "KEY" in var:
             # Mask sensitive data
             if len(value) > 4:
-                # Fix mask for short values
-                if len(value) > 4:
-                    masked = value[:2] + "*" * (len(value) - 4) + value[-2:]
-                elif len(value) > 0:
-                    masked = "*" * len(value)
-                else:
-                    masked = "***"
+                masked = value[:2] + "*" * (len(value) - 4) + value[-2:]
+            elif len(value) > 0:
+                masked = "*" * len(value)
             else:
                 masked = "***"
             logger.info(f"{var}={masked}")
@@ -157,181 +121,38 @@ def log_environment_variables():
     logger.info("=" * 60)
 
 
-# Configuration (Ideally loaded from environment variables)
-# We use absolute paths to avoid PermissionError when running as a service
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-KEYS_JSON_PATH = os.getenv("KEYS_JSON_PATH", os.path.join(BASE_DIR, "docs/keys.json"))
-# Default path set to standard Xray system config location
-XRAY_CONFIG_PATH = os.getenv("XRAY_CONFIG_PATH", "/usr/local/etc/xray/config.json")
-CHECK_TIMEOUT = float(os.getenv("CHECK_TIMEOUT", 5.0))
-CHECK_INTERVAL = float(os.getenv("CHECK_INTERVAL", 10.0))
-
-# Shadowsocks Settings for Inbound
-SS_INBOUND_PORT = int(os.getenv("SS_INBOUND_PORT", 8388))
-SS_PASSWORD = os.getenv("SS_PASSWORD", "your_secure_password_here")
-SS_METHOD = os.getenv("SS_METHOD", "2022-blake3-aes-128-gcm")
-
-# Validate SS_PASSWORD for 2022 methods
-if SS_METHOD and "2022" in SS_METHOD.lower():
-    if len(SS_PASSWORD.encode('utf-8')) != 16:
-        logger.warning(f"SS_PASSWORD should be exactly 16 bytes for 2022 methods. Current length: {len(SS_PASSWORD.encode('utf-8'))} bytes")
-
-# Multi-client Gateway Settings
-GATEWAY_MODE = os.getenv("GATEWAY_MODE", "single")  # 'single' or 'multi'
-XRAY_OUTBOUND_NETWORK = os.getenv("XRAY_OUTBOUND_NETWORK", "tcp")
-XRAY_SECURITY = os.getenv("XRAY_SECURITY", "tls")
-XRAY_INBOUND_SOCKS_PORT = int(os.getenv("XRAY_INBOUND_SOCKS_PORT", 1080))
-
-# Client-specific settings (parsed from comma-separated values)
-CLIENT_UUIDS = []
-CLIENT_KEYS = []
-
-# IPv6 and Chain Configuration
-ENABLE_IPV6_BLOCK = os.getenv("ENABLE_IPV6_BLOCK", "true").lower() == "true"
-WARP_SOCKS_PORT = int(os.getenv("WARP_SOCKS_PORT", 40000))
-WARP_DOMAINS = _parse_comma_separated_env("WARP_DOMAINS", ["openai.com", "chatgpt.com", "ai.com"])
-CHAIN_OUTBOUND_TAG = os.getenv("CHAIN_OUTBOUND_TAG", "chain-vless-out")
-
-
-def _parse_comma_separated_env(env_name, default=None):
-    """Parse a comma-separated environment variable into a list."""
-    value = os.getenv(env_name, "")
-    if not value:
-        return default if default else []
-    return [item.strip() for item in value.split(",") if item.strip()]
-
-
-def _load_client_settings():
-    """Load client UUIDs and keys from environment variables."""
-    global CLIENT_UUIDS, CLIENT_KEYS
-    
-    if GATEWAY_MODE == "multi":
-        CLIENT_UUIDS = _parse_comma_separated_env("CLIENT_UUIDS")
-        CLIENT_KEYS = _parse_comma_separated_env("CLIENT_KEYS")
-        
-        if len(CLIENT_UUIDS) != len(CLIENT_KEYS):
-            logger.warning(f"UUID count ({len(CLIENT_UUIDS)}) != Key count ({len(CLIENT_KEYS)})")
-        
-        logger.info(f"Loaded {len(CLIENT_UUIDS)} client(s) for multi-client mode")
-    else:
-        logger.info("Running in single-key mode")
-
-
 class XrayManager:
+    """Manages Xray configuration generation and application."""
+    
     def __init__(self, config_path, xray_service_name="xray"):
         self.config_path = config_path
         self.xray_service_name = xray_service_name
         self.current_key = None
-
+    
     def parse_vless_key(self, key):
-        """Parses a VLESS key into a dictionary for Xray outbound configuration.
-        
-        Args:
-            key: VLESS key string in format: vless://UUID@HOST:PORT?PARAMS#TAG
-            
-        Returns:
-            Dict with parsed VLESS info or None if parsing fails
-        """
-        try:
-            if not key or not key.startswith("vless://"):
-                logger.error("Invalid VLESS key: must start with 'vless://'")
-                return None
-            
-            content = key[len("vless://"):]
-            if "@" not in content:
-                logger.error("Invalid VLESS key: missing '@' separator")
-                return None
-            
-            uuid, remainder = content.split("@", 1)
-            parts = re.split(r'[?#]', remainder)
-            host_port = parts[0]
-            
-            # Handle IPv6 addresses in brackets
-            if host_port.startswith("["):
-                # IPv6 format: [2001:db8::1]:443
-                match = re.match(r'\[([^\]]+)\]:(\d+)$', host_port)
-                if match:
-                    host = match.group(1)
-                    port = int(match.group(2))
-                else:
-                    logger.error("Invalid IPv6 address format")
-                    return None
-            elif ":" in host_port:
-                host, port = host_port.rsplit(":", 1)
-                port = int(port)
-            else:
-                host = host_port
-                port = 443
-            
-            # Validate port range
-            if port < 1 or port > 65535:
-                logger.error(f"Invalid port: {port}")
-                return None
-            
-            params = {}
-            if len(parts) > 1:
-                query_str = parts[1]
-                for pair in query_str.split("&"):
-                    if "=" in pair:
-                        k, v = pair.split("=", 1)
-                        params[k] = v
-            
-            fragment = ""
-            if len(parts) > 2:
-                fragment = parts[2]
-
-            result = {
-                "uuid": uuid,
-                "address": host,
-                "port": port,
-                "encryption": params.get("encryption", "none"),
-                "security": params.get("security", "tls"),
-                "sni": params.get("sni") or fragment,
-                "type": "vless"
-            }
-            
-            # Add REALITY-specific parameters if available
-            if params.get("security") == "reality":
-                result["realitySettings"] = {
-                    "publicKey": params.get("pbk", ""),
-                    "shortId": params.get("sid", ""),
-                    "serverName": params.get("sni") or fragment,
-                    "spiderX": params.get("spiderX", "")
-                }
-            
-            return result
-        except ValueError as e:
-            logger.error(f"Failed to parse VLESS key: {e}")
-            return None
-        except Exception as e:
-            logger.error(f"Failed to parse VLESS key: {e}")
-            return None
-
+        """Parse VLESS key using the modular config module."""
+        return parse_vless_key(key)
+    
     def _build_stream_settings(self, vless_info):
-        """Build stream settings for VLESS outbound.
+        """Build stream settings for VLESS outbound."""
+        security = vless_info.get("security", "tls")
         
-        Args:
-            vless_info: Parsed VLESS key information
-            
-        Returns:
-            Stream settings dict or None if no security
-        """
-        security = vless_info["security"]
+        if security not in ["tls", "reality"]:
+            return None
         
         stream_settings = {
-            "network": XRAY_OUTBOUND_NETWORK,
+            "network": os.getenv("XRAY_OUTBOUND_NETWORK", "tcp"),
             "security": security
-        } if security in ["tls", "reality"] else None
+        }
         
         if security == "tls":
             stream_settings["tlsSettings"] = {
-                "serverName": vless_info["sni"]
+                "serverName": vless_info.get("sni")
             }
         elif security == "reality":
             reality_settings = vless_info.get("realitySettings", {})
             stream_settings["realitySettings"] = {
-                "serverName": reality_settings.get("serverName", vless_info["sni"]),
+                "serverName": reality_settings.get("serverName", vless_info.get("sni")),
                 "publicKey": reality_settings.get("publicKey", ""),
                 "shortId": reality_settings.get("shortId", ""),
                 "spiderX": reality_settings.get("spiderX", "")
@@ -340,34 +161,23 @@ class XrayManager:
         return stream_settings
     
     def _build_vless_outbound(self, vless_info, tag, client_uuid=None, is_chain=False):
-        """Build a single VLESS outbound configuration.
-        
-        Args:
-            vless_info: Parsed VLESS key information
-            tag: Tag for the outbound
-            client_uuid: Optional client UUID for multi-client mode
-            is_chain: If True, mark this as a chain outbound for explicit routing
-        """
+        """Build a single VLESS outbound configuration."""
         flow = vless_info.get("flow", "")
         
         stream_settings = self._build_stream_settings(vless_info)
         
         outbound = {
-            "protocol": vless_info["type"],
+            "protocol": vless_info.get("type", "vless"),
             "settings": {
-                "vnext": [
-                    {
-                        "address": vless_info["address"],
-                        "port": vless_info["port"],
-                        "users": [
-                            {
-                                "id": vless_info["uuid"] if client_uuid is None else client_uuid,
-                                "encryption": vless_info["encryption"],
-                                "flow": flow
-                            }
-                        ]
-                    }
-                ]
+                "vnext": [{
+                    "address": vless_info["address"],
+                    "port": vless_info["port"],
+                    "users": [{
+                        "id": vless_info["uuid"] if client_uuid is None else client_uuid,
+                        "encryption": vless_info["encryption"],
+                        "flow": flow
+                    }]
+                }]
             },
             "streamSettings": stream_settings,
             "tag": tag
@@ -376,17 +186,7 @@ class XrayManager:
         return outbound
     
     def _build_chain_vless_outbound(self, chain_key):
-        """Build a chain VLESS outbound configuration for explicit routing.
-        
-        This creates an outbound that can be explicitly routed via routing rules
-        to prevent IP leaks in chain configurations (Client -> VPS -> Second VLESS).
-        
-        Args:
-            chain_key: The VLESS key for the second hop in the chain
-            
-        Returns:
-            Outbound configuration dict or None if parsing fails
-        """
+        """Build a chain VLESS outbound configuration."""
         vless_info = self.parse_vless_key(chain_key)
         if not vless_info:
             logger.error("Failed to parse chain VLESS key")
@@ -395,120 +195,80 @@ class XrayManager:
         stream_settings = self._build_stream_settings(vless_info)
         
         outbound = {
-            "protocol": vless_info["type"],
+            "protocol": vless_info.get("type", "vless"),
             "settings": {
-                "vnext": [
-                    {
-                        "address": vless_info["address"],
-                        "port": vless_info["port"],
-                        "users": [{
-                            "id": vless_info["uuid"],
-                            "encryption": vless_info["encryption"],
-                            "flow": vless_info.get("flow", "")
-                        }]
-                    }
-                ]
+                "vnext": [{
+                    "address": vless_info["address"],
+                    "port": vless_info["port"],
+                    "users": [{
+                        "id": vless_info["uuid"],
+                        "encryption": vless_info["encryption"],
+                        "flow": vless_info.get("flow", "")
+                    }]
+                }]
             },
             "streamSettings": stream_settings,
-            "tag": CHAIN_OUTBOUND_TAG
+            "tag": "chain-vless-out"
         }
         
-        logger.info(f"Built chain VLESS outbound: {CHAIN_OUTBOUND_TAG} -> {vless_info['address']}:{vless_info['port']}")
         return outbound
-
+    
     def generate_config(self, vless_info=None, client_vless_infos=None):
-        """Generates the full Xray JSON configuration including Shadowsocks Inbound."""
+        """Generate Xray configuration."""
+        from config.builder import XrayConfigBuilder
+        from config.warp import WarpConfig
+        from config.ipv6 import IPv6Config
+        from config.rules import RoutingRulesBuilder
+        # Parse environment variables
+        XRAY_OUTBOUND_NETWORK = os.getenv("XRAY_OUTBOUND_NETWORK", "tcp")
+        XRAY_SECURITY = os.getenv("XRAY_SECURITY", "tls")
+        XRAY_INBOUND_SOCKS_PORT = int(os.getenv("XRAY_INBOUND_SOCKS_PORT", "1080"))
+        ENABLE_IPV6_BLOCK = os.getenv("ENABLE_IPV6_BLOCK", "true").lower() == "true"
+        WARP_SOCKS_PORT = int(os.getenv("WARP_SOCKS_PORT", "40000"))
+        WARP_DOMAINS = _parse_comma_separated_env("WARP_DOMAINS", ["openai.com", "chatgpt.com", "ai.com"])
+        CHAIN_OUTBOUND_TAG = os.getenv("CHAIN_OUTBOUND_TAG", "chain-vless-out")
+        SS_INBOUND_PORT = int(os.getenv("SS_INBOUND_PORT", "8388"))
         
-        # Build inbounds
-        inbounds = [
-            {
-                "port": XRAY_INBOUND_SOCKS_PORT,
-                "protocol": "socks",
-                "tag": "socks-in",
-                "settings": {
-                    "auth": "noauth",
-                    "udp": True
-                },
-                "sniffing": {
-                    "enabled": True,
-                    "destOverride": ["http", "tls"]
-                }
+        # Get VPS IP
+        vps_ip = os.getenv("VPS_IP", "YOUR_VPS_IP_ADDRESS")
+        
+        builder = XrayConfigBuilder()
+        
+        # Add inbound for Shadowsocks
+        builder.add_inbound(
+            port=SS_INBOUND_PORT,
+            protocol="shadowsocks",
+            listen="0.0.0.0",
+            tag="shadowsocks-in",
+            settings={
+                "method": SS_METHOD,
+                "password": SS_PASSWORD,
+                "timeout": 300,
+                "udp": True
             },
-            {
-                "port": SS_INBOUND_PORT,
-                "protocol": "shadowsocks",
-                "tag": "shadowsocks-in",
-                "settings": {
-                    "method": SS_METHOD,
-                    "password": SS_PASSWORD
-                }
+            sniffing={
+                "enabled": True,
+                "destOverride": ["http", "tls"]
             }
+        )
+        
+        # Add inbound for SOCKS5
+        builder.add_inbound(
+            port=XRAY_INBOUND_SOCKS_PORT,
+            protocol="socks",
+            listen="0.0.0.0",
+            tag="socks-in",
+            settings={
+                "auth": "noauth",
+                "udp": True,
+                "ip": "127.0.0.1"
+            }
+        )
+        
+        outbounds = [
+            {"protocol": "freedom", "settings": {}, "tag": "direct"},
+            {"protocol": "blackhole", "settings": {}, "tag": "blocked"}
         ]
-        
-        # Build outbounds
-        outbounds = []
-        routing_rules = []
-        
-        if GATEWAY_MODE == "multi" and client_vless_infos:
-            # Multi-client mode: create multiple outbounds with routing rules
-            for i, (tag, info) in enumerate(client_vless_infos.items()):
-                outbound = self._build_vless_outbound(info, tag=f"proxy-{i}")
-                outbounds.append(outbound)
-                
-                # Add routing rule to use this outbound for this client's UUID
-                routing_rules.append({
-                    "type": "field",
-                    "user": [info["uuid"]],
-                    "outboundTag": tag
-                })
-                logger.debug(f"Added routing rule for user {info['uuid']} -> {tag}")
-            
-            # Default fallback rule
-            routing_rules.append({
-                "type": "field",
-                "network": "tcp,udp",
-                "outboundTag": "proxy-0"  # Default to first proxy
-            })
-            
-        else:
-            # Single-key mode
-            outbound = self._build_vless_outbound(vless_info, "proxy")
-            outbounds.append(outbound)
-            
-            # Check for chain VLESS key in environment
-            chain_key = os.getenv("CHAIN_VLESS_KEY")
-            if chain_key:
-                chain_outbound = self._build_chain_vless_outbound(chain_key)
-                if chain_outbound:
-                    outbounds.append(chain_outbound)
-                    # Add routing rule: all traffic goes to chain VLESS
-                    routing_rules.append({
-                        "type": "field",
-                        "inboundTag": ["socks-in", "shadowsocks-in"],
-                        "outboundTag": CHAIN_OUTBOUND_TAG
-                    })
-                    logger.info(f"Chain VLESS routing enabled: all traffic -> {CHAIN_OUTBOUND_TAG}")
-            
-            # Single rule for all traffic
-            routing_rules.append({
-                "type": "field",
-                "network": "tcp,udp",
-                "outboundTag": "proxy"
-            })
-        
-        # Add direct and blocked outbounds
-        outbounds.extend([
-            {
-                "protocol": "freedom",
-                "settings": {},
-                "tag": "direct"
-            },
-            {
-                "protocol": "blackhole",
-                "settings": {},
-                "tag": "blocked"
-            }
-        ])
         
         # Add WARP outbound if WARP domains are configured
         if WARP_DOMAINS and len(WARP_DOMAINS) > 0:
@@ -524,83 +284,65 @@ class XrayManager:
             })
             logger.info(f"Added WARP proxy outbound for domains: {WARP_DOMAINS}")
         
-        # Build routing rules - direct rules MUST come before proxy rules!
-        direct_rules = [
-            #ru-domains - direct
-            {
-                "type": "field",
-                "domain": ["geosite:ru"],
-                "outboundTag": "direct"
-            },
-            #ru-IPs - direct
-            {
-                "type": "field",
-                "ip": ["geoip:ru"],
-                "outboundTag": "direct"
-            },
-            #Blocked sites - direct (block or direct)
-            {
-                "type": "field",
-                "domain": ["geosite:ru-blocked"],
-                "outboundTag": "direct"
-            }
-        ]
+        # Chain outbound for explicit routing (if configured)
+        if os.getenv("CHAIN_VLESS_KEY"):
+            chain_outbound = self._build_chain_vless_outbound(os.getenv("CHAIN_VLESS_KEY"))
+            if chain_outbound:
+                outbounds.append(chain_outbound)
+                logger.info(f"Added chain VLESS outbound: {CHAIN_OUTBOUND_TAG}")
         
-        # IPv6 blocking rules - MUST come before other proxy rules!
-        if ENABLE_IPV6_BLOCK:
-            direct_rules.extend([
-                # Block IPv6 traffic via proxy - route to blocked
-                {
-                    "type": "field",
-                    "ip": ["geoip6:all"],
-                    "outboundTag": "blocked"
-                },
-                # Allow Russian IPv6 traffic to go direct
-                {
-                    "type": "field",
-                    "ip": ["geoip6:ru"],
-                    "outboundTag": "direct"
-                }
-            ])
-            logger.info("IPv6 blocking enabled - all IPv6 traffic routed to blocked")
-        else:
-            logger.info("IPv6 blocking disabled - IPv6 traffic may leak")
+        # Single-mode: Add VLESS outbound
+        if vless_info:
+            outbound = self._build_vless_outbound(vless_info, "proxy-out")
+            outbounds.append(outbound)
         
-        # WARP routing rules - before chain/outbound rules
-        for domain in WARP_DOMAINS:
-            direct_rules.append({
+        # Multi-mode: Add multiple VLESS outbounds
+        if client_vless_infos:
+            for tag, info in client_vless_infos.items():
+                outbound = self._build_vless_outbound(info, tag)
+                outbounds.append(outbound)
+        
+        # Build routing rules
+        warp_config = WarpConfig(enabled=len(WARP_DOMAINS) > 0, domains=WARP_DOMAINS, port=WARP_SOCKS_PORT)
+        ipv6_config = IPv6Config(enabled=ENABLE_IPV6_BLOCK)
+        rules_builder = RoutingRulesBuilder(enable_ipv6_block=ipv6_config.enabled, warp_config=warp_config)
+        
+        direct_rules = rules_builder.build_all_rules()
+        routing_rules = []
+        
+        # Chain routing rule (if chain is configured)
+        if os.getenv("CHAIN_VLESS_KEY"):
+            routing_rules.append({
                 "type": "field",
-                "domain": [f"full:{domain}"],
-                "outboundTag": "warp-proxy"
+                "outboundTag": CHAIN_OUTBOUND_TAG,
+                "network": "tcp,udp"
             })
-            logger.debug(f"Added WARP routing rule for domain: {domain}")
         
-        # Add blocked outbound for truly blocked sites if needed
-        config = {
-            "log": {
-                "loglevel": "warning"
-            },
-            "inbounds": inbounds,
-            "outbounds": outbounds,
-            "routing": {
-                "domainStrategy": "IPIfNonMatch",
-                "implicitIPSetMatch": True,
-                "rules": direct_rules + routing_rules
-            }
-        }
+        # Proxy outbound rule
+        if vless_info or client_vless_infos:
+            routing_rules.append({
+                "type": "field",
+                "network": "tcp,udp",
+                "outboundTag": "proxy-out"
+            })
+        
+        config = builder.build()
+        config["inbounds"] = builder.inbounds
+        config["outbounds"] = outbounds
+        config["routing"]["rules"] = direct_rules + routing_rules
         
         return config
-
+    
     async def apply_config(self, key=None):
-        """Apply Xray configuration. For multi-client mode, key is ignored."""
+        """Apply Xray configuration."""
+        import json
+        
         if GATEWAY_MODE == "multi":
             if not CLIENT_KEYS:
                 logger.error("CLIENT_KEYS is empty for multi-client mode.")
                 return False
             
             client_vless_infos = {}
-            
-            # Build vless info for each client
             for i, key_str in enumerate(CLIENT_KEYS):
                 vless_info = self.parse_vless_key(key_str)
                 if vless_info:
@@ -614,11 +356,8 @@ class XrayManager:
                 return False
             
             config = self.generate_config(client_vless_infos=client_vless_infos)
-            # Log the full config for debugging
             logger.debug(f"Generated multi-client config: {json.dumps(config, indent=2)}")
-            
         else:
-            # Single-key mode
             if not key:
                 logger.error("No key provided for single-key mode.")
                 return False
@@ -630,187 +369,82 @@ class XrayManager:
             
             config = self.generate_config(vless_info=vless_info)
         
-        # Log the full config for debugging
         logger.info("=== XRAY CONFIGURATION DUMP START ===")
         logger.info(f"Config path: {self.config_path}")
         logger.info(f"Generated config JSON:\n{json.dumps(config, indent=2)}")
         logger.info("=== XRAY CONFIGURATION DUMP END ===")
         
-        # Verify directory exists and is writable
         config_dir = os.path.dirname(self.config_path)
         logger.info(f"Checking config directory: {config_dir}")
-        if os.path.exists(config_dir):
-            logger.info(f"Config directory exists: {config_dir}")
-        else:
-            logger.warning(f"Config directory does not exist: {config_dir}")
         
-        # Check if file exists before overwriting
-        if os.path.exists(self.config_path):
-            logger.info(f"Existing config file found at {self.config_path}")
+        if not os.path.exists(config_dir):
             try:
-                with open(self.config_path, "r") as f:
-                    old_content = f.read()
-                logger.info(f"Old config size: {len(old_content)} bytes")
+                os.makedirs(config_dir)
+                logger.info(f"Created config directory: {config_dir}")
             except Exception as e:
-                logger.error(f"Could not read old config: {e}")
-        
-        # Step 1: Write config to file
-        logger.info(f"STEP 1: Attempting to write config to {self.config_path}")
-        try:
-            logger.info(f"Opening file for writing: {self.config_path}")
-            with open(self.config_path, "w") as f:
-                logger.info(f"File opened successfully, writing JSON...")
-                json.dump(config, f, indent=2)
-                logger.info(f"JSON written successfully")
-            
-            logger.info(f"STEP 2: Verifying written config")
-            logger.info(f"SUCCESS: New config written to {self.config_path}")
-            
-            # Verify the file was written correctly
-            try:
-                logger.info(f"Opening file for verification read: {self.config_path}")
-                with open(self.config_path, "r") as f:
-                    content = f.read()
-                logger.info(f"VERIFICATION: Read back config file, size: {len(content)} bytes")
-                logger.info(f"VERIFICATION: First 200 chars: {content[:200]}")
-                logger.info(f"VERIFICATION: File path resolved to: {os.path.realpath(self.config_path)}")
-            except Exception as e:
-                logger.error(f"VERIFICATION FAILED: Could not read back file: {e}")
-            
-            logger.info(f"STEP 3: Restarting Xray service: {self.xray_service_name}...")
-            
-            # In production, use:
-            logger.info(f"STEP 4: Executing systemctl restart xray...")
-            await asyncio.create_subprocess_shell(f"sudo systemctl restart {self.xray_service_name}")
-            logger.info(f"STEP 5: Xray restart command completed (async)")
-            
-            self.current_key = key
-            return True
-        except Exception as e:
-            logger.error(f"Failed to apply Xray config: {e}")
-            return False
-
-
-class GatewayMonitor:
-    def __init__(self, keys_path, xray_manager):
-        self.keys_path = keys_path
-        self.xray_manager = xray_manager
-        self.key_pool = []
-        self.current_index = 0
-
-    def load_key_pool(self):
-        try:
-            if not os.path.exists(self.keys_path):
-                logger.error(f"Keys file not found: {self.keys_path}")
+                logger.error(f"Failed to create config directory: {e}")
                 return False
-            with open(self.keys_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            
-            pool = []
-            def extract_keys(obj):
-                if isinstance(obj, dict):
-                    for k, v in obj.items():
-                        if k in ["top10", "top5"] and isinstance(v, list):
-                            for entry in v:
-                                if isinstance(entry, dict) and "key" in entry:
-                                    pool.append(entry["key"])
-                        else:
-                            extract_keys(v)
-                elif isinstance(obj, list):
-                    for item in obj:
-                        extract_keys(item)
-
-            extract_keys(data)
-            self.key_pool = list(dict.fromkeys(pool))
-            logger.info(f"Loaded {len(self.key_pool)} keys from {self.keys_path}")
-            return len(self.key_pool) > 0
-        except Exception as e:
-            logger.error(f"Failed to load key pool: {e}")
-            return False
-
-    async def check_connection(self, key):
-        vless_info = self.xray_manager.parse_vless_key(key)
-        if not vless_info:
-            return False
-
+        
+        # Write config to file
         try:
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(vless_info["address"], vless_info["port"]),
-                timeout=CHECK_TIMEOUT
-            )
-            writer.close()
-            await writer.wait_closed()
-            return True
+            with open(self.config_path, "w") as f:
+                json.dump(config, f, indent=2)
+            logger.info(f"Config written to {self.config_path}")
         except Exception as e:
-            logger.debug(f"Connection check failed for {vless_info['address']}: {e}")
+            logger.error(f"Failed to write config: {e}")
             return False
-
-    async def run(self):
-        logger.info("=== STEP 1: INITIALIZATION ===")
-        # Load client settings for multi-client mode
-        _load_client_settings()
         
-        logger.info(f"Current GATEWAY_MODE: {GATEWAY_MODE}")
+        # Restart Xray service
+        try:
+            await asyncio.create_subprocess_shell(f"sudo systemctl restart {self.xray_service_name}")
+            logger.info(f"Restarted {self.xray_service_name} service")
+        except Exception as e:
+            logger.error(f"Failed to restart Xray: {e}")
+            return False
         
-        if GATEWAY_MODE == "multi":
-            logger.info("=== STEP 2: MULTI-CLIENT MODE ===")
-            # Multi-client mode: no key rotation, all clients connected simultaneously
-            logger.info("Starting in multi-client mode - all clients connected simultaneously")
-            if not await self.xray_manager.apply_config():
-                logger.error("Multi-client configuration failed.")
-                return
-            logger.info("Multi-client gateway started. All clients connected.")
-            # Keep running without rotation
-            while True:
-                await asyncio.sleep(3600)  # Sleep without checks
-        else:
-            logger.info("=== STEP 2: SINGLE-KEY MODE ===")
-            # Single-key mode: run with key rotation
-            logger.info("Loading key pool from JSON file...")
-            if not self.load_key_pool():
-                logger.error("No keys available in pool. Exiting.")
-                return
-            
-            logger.info(f"Key pool loaded successfully. Total keys: {len(self.key_pool)}")
-            logger.info(f"Initializing with first key: {self.key_pool[self.current_index][:30]}...")
-            logger.info("=== STEP 3: APPLY INITIAL CONFIG ===")
-            if not await self.xray_manager.apply_config(self.key_pool[self.current_index]):
-                logger.error("Initial configuration failed.")
-                return
+        self.current_key = key
+        return True
 
-            logger.info("=== STEP 4: START GATEWAY MONITOR ===")
-            logger.info("Gateway monitor started.")
 
-            while True:
-                if not self.key_pool:
-                    logger.error("Key pool is empty. Exiting.")
-                    return
-                current_key = self.key_pool[self.current_index]
-                is_alive = await self.check_connection(current_key)
-
-                if not is_alive:
-                    logger.warning(f"⚠️ Connection lost! Current key is dead: {current_key[:30]}...")
+async def _get_current_xray_key() -> Optional[str]:
+    """Get current key from active Xray configuration.
+    
+    Returns:
+        VLESS key string if found, None otherwise
+    """
+    try:
+        if not os.path.exists(XRAY_CONFIG_PATH):
+            logger.warning(f"Xray config not found: {XRAY_CONFIG_PATH}")
+            return None
+        
+        with open(XRAY_CONFIG_PATH, "r", encoding="utf-8") as f:
+            config = json.load(f)
+        
+        # Look for VLESS outbound in config
+        for outbound in config.get("outbounds", []):
+            if outbound.get("protocol") == "vless":
+                settings = outbound.get("settings", {})
+                vnext = settings.get("vnext", [])
+                if vnext:
+                    user = vnext[0].get("users", [{}])[0]
+                    uuid = user.get("id", "")
+                    address = vnext[0].get("address", "")
+                    port = vnext[0].get("port", 443)
                     
-                    self.current_index = (self.current_index + 1) % len(self.key_pool)
-                    new_key = self.key_pool[self.current_index]
-                    
-                    logger.info(f"🔄 Rotating to next key: {new_key[:30]}...")
-                    logger.info("=== STEP 5: APPLY NEW CONFIG ===")
-                    success = await self.xray_manager.apply_config(new_key)
-                    
-                    if success:
-                        logger.info("✅ Rotation successful.")
-                    else:
-                        logger.error("❌ Rotation failed! Retrying with backoff...")
-                        await asyncio.sleep(1)  # Small delay before retrying
-                        continue
-                else:
-                    logger.info(f"🟢 Connection healthy. Node: {self.xray_manager.parse_vless_key(current_key)['address']}")
-
-                await asyncio.sleep(CHECK_INTERVAL)
+                    # Reconstruct VLESS key
+                    return parse_vless_key(f"vless://{uuid}@{address}:{port}")
+    except Exception as e:
+        logger.error(f"Failed to get current Xray key: {e}")
+    
+    return None
 
 
-async def main():
+async def main(use_keys: bool = True):
+    """Main entry point.
+    
+    Args:
+        use_keys: If True, use keys from keys.json; otherwise use current Xray config
+    """
     logger.info("=" * 60)
     logger.info("=== GATEWAY MANAGER STARTING ===")
     logger.info("=" * 60)
@@ -818,35 +452,77 @@ async def main():
     # Log all environment variables
     log_environment_variables()
     
+    # Load client settings for multi-client mode
+    _load_client_settings()
+    
     xray_manager = XrayManager(XRAY_CONFIG_PATH)
-    monitor = GatewayMonitor(KEYS_JSON_PATH, xray_manager)
-    await monitor.run()
+    
+    if use_keys:
+        monitor = GatewayMonitor(KEYS_JSON_PATH, xray_manager)
+        try:
+            await monitor.run()
+        except KeyboardInterrupt:
+            logger.info("Gateway monitor stopped by user.")
+    else:
+        # Use current running Xray configuration
+        logger.info("=== Using current Xray configuration ===")
+        current_key = _get_current_xray_key()
+        
+        if not current_key:
+            logger.error("Could not determine current Xray key. Exiting.")
+            return
+        
+        logger.info(f"Current key detected: {current_key[:40]}...")
+        
+        # Apply current configuration
+        if not await xray_manager.apply_config(current_key):
+            logger.error("Failed to apply current configuration.")
+            return
+        
+        logger.info("Current Xray configuration applied successfully.")
+        logger.info("Gateway running in single-key mode with current config.")
+        logger.info("Press Ctrl+C to stop.")
+        
+        # Keep running - use GatewayMonitor's check loop but with single key
+        monitor = GatewayMonitor(KEYS_JSON_PATH, xray_manager)
+        monitor.key_pool = [current_key]
+        monitor.current_index = 0
+        
+        try:
+            # Simple health check loop with current key
+            while True:
+                is_alive = await monitor.check_connection(current_key)
+                if is_alive:
+                    logger.info(f"🟢 Connection healthy to {current_key[:30]}...")
+                else:
+                    logger.warning(f"⚠️ Connection lost to {current_key[:30]}...")
+                
+                await asyncio.sleep(10.0)  # CHECK_INTERVAL
+        except KeyboardInterrupt:
+            logger.info("Gateway monitor stopped by user.")
 
 
 def print_usage():
-    """Print usage information for command-line options."""
-    usage = """
+    """Print usage information."""
+    print("""
 Usage: python3 gateway_manager.py [OPTIONS]
 
 Options:
-  --gen-ss                Generate a Shadowsocks key for Outline (using .env settings)
+  --gen-ss                Generate a Shadowsocks key for Outline
   --gen-ss-full METHOD:PASS@IP:PORT
                           Generate a Shadowsocks key with full parameters
-                          Format: METHOD:PASSWORD@IP:PORT
-                          Example: aes-256-gcm:mypassword@192.168.1.100:443
+  --use-keys              Use VLESS keys from keys.json file
   -h, --help              Show this help message
 
 Examples:
   python3 gateway_manager.py --gen-ss
   python3 gateway_manager.py --gen-ss-full "aes-256-gcm:my_password@192.168.1.100:443"
-"""
-    print(usage)
+  python3 gateway_manager.py --use-keys
+""")
 
 
 def handle_cli_args():
-    """Handle command-line arguments for key generation."""
-    import sys
-    
+    """Handle command-line arguments."""
     if len(sys.argv) < 2:
         return None
     
@@ -864,30 +540,29 @@ def handle_cli_args():
         print(f"  Port: {os.getenv('SS_INBOUND_PORT', '443')}")
         print()
         ss_link = generate_shadowsocks_key()
-        print(f"\n✅ Generated Shadowsocks link:\n{ss_link}")
+        print(f"\nGenerated Shadowsocks link:\n{ss_link}")
         return "gen-ss"
     
     if arg == "--gen-ss-full":
         if len(sys.argv) < 3:
-            print("❌ Error: --gen-ss-full requires a parameter in format METHOD:PASS@IP:PORT")
+            print("Error: --gen-ss-full requires a parameter in format METHOD:PASS@IP:PORT")
             print("Example: aes-256-gcm:my_password@192.168.1.100:443")
             return None
         param = sys.argv[2]
         try:
-            # Parse format: METHOD:PASS@IP:PORT
             auth_part, host_part = param.split("@")
             method, password = auth_part.split(":", 1)
             ip, port = host_part.rsplit(":", 1)
-            ss_link = generate_shadowsocks_key_with_params(
+            ss_link = generate_shadowsocks_key(
                 ss_method=method,
                 ss_password=password,
                 vps_ip=ip,
                 ss_port=int(port)
             )
-            print(f"\n✅ Generated Shadowsocks link:\n{ss_link}")
+            print(f"\nGenerated Shadowsocks link:\n{ss_link}")
             return "gen-ss-full"
         except ValueError as e:
-            print(f"❌ Error parsing parameter: {e}")
+            print(f"Error parsing parameter: {e}")
             print("Format: METHOD:PASSWORD@IP:PORT")
             print("Example: aes-256-gcm:my_password@192.168.1.100:443")
             return None
@@ -896,8 +571,6 @@ def handle_cli_args():
 
 
 if __name__ == "__main__":
-    import signal
-    
     # Graceful shutdown handler
     shutdown_event = asyncio.Event()
     
@@ -905,7 +578,7 @@ if __name__ == "__main__":
         logger.info(f"Received signal {sig}, shutting down...")
         shutdown_event.set()
     
-    # Register signal handlers for SIGINT and SIGTERM
+    # Register signal handlers
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
@@ -913,12 +586,18 @@ if __name__ == "__main__":
     cli_result = handle_cli_args()
     
     if cli_result in ("help", "gen-ss", "gen-ss-full"):
-        # Key generation mode - exit after generating
         sys.exit(0)
     
     # Run normal gateway monitor
+    use_keys = "--use-keys" in sys.argv
+    
+    if use_keys:
+        logger.info("Using keys from keys.json file")
+    else:
+        logger.info("Using currently running Xray configuration as last key")
+    
     try:
-        asyncio.run(main())
+        asyncio.run(main(use_keys=use_keys))
     except KeyboardInterrupt:
         logger.info("Gateway monitor stopped by user.")
     except Exception as e:
