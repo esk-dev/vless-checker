@@ -89,7 +89,7 @@ class GatewayMonitor:
         vless_info = self.xray_manager.parse_vless_key(key)
         if not vless_info:
             return False
-        
+        logger.debug(f"Vless Info object {vless_info}");
         try:
             reader, writer = await asyncio.wait_for(
                 asyncio.open_connection(vless_info["address"], vless_info["port"]),
