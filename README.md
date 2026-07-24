@@ -146,6 +146,7 @@ sudo systemctl enable --now vless-checker.timer
 | `SS_PASSWORD` | Пароль для Shadowsocks-2022 | `secure_password_123` |
 | `SS_METHOD` | Метод шифрования SS | `2022-blake3-aes-128-gcm` |
 | `GATEWAY_MODE` | Режим работы: `single` или `multi` | `single` |
+| `KEY_SOURCE_MODE` | Режим источника ключей: `keys_json` или `direct_internet` | `keys_json` |
 | `XRAY_OUTBOUND_NETWORK` | Тип сети для outbound: `tcp`, `xhttp`, `ws` | `tcp` |
 | `XRAY_SECURITY` | Тип безопасности: `tls`, `reality`, `none` | `tls` |
 | `CLIENT_UUIDS` | UUID клиентов (через запятую) | - |
@@ -160,6 +161,25 @@ sudo systemctl enable --now vless-checker.timer
 | `CLIENT_KEYS` | VLESS ключи через запятую | `key1,key2,key3` |
 
 **Примечание:** Количество UUID должно совпадать с количеством ключей!
+
+---
+
+### Key Source Mode Настройка
+
+| Переменная | Описание | Значения | По умолчанию |
+| :--- | :--- | :--- | :--- |
+| `KEY_SOURCE_MODE` | Режим источника ключей для исходящего трафика | `keys_json`, `direct_internet` | `keys_json` |
+
+#### Режим keys_json (по умолчанию)
+Использует лучший VLESS ключ из `docs/keys.json` для исходящего трафика. Если текущий ключ в Xray конфиге недоступен, система автоматически получает лучший ключ из `KEYS_JSON_PATH`.
+
+#### Режим direct_internet
+Использует прямое соединение без прокси (freedom outbound). Полезно для диагностики проблем с сетью или когда VLESS не требуется.
+
+**Пример настройки:**
+```env
+KEY_SOURCE_MODE=direct_internet
+```
 
 ---
 

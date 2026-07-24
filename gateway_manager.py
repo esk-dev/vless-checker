@@ -46,6 +46,11 @@ SS_PASSWORD = os.getenv("SS_PASSWORD", "your_secure_password_here")
 SS_METHOD = os.getenv("SS_METHOD", "2022-blake3-aes-128-gcm")
 GATEWAY_MODE = os.getenv("GATEWAY_MODE", "single")
 
+# Key source mode: 'keys_json' or 'direct_internet'
+# - 'keys_json': Get best key from KEYS_JSON_PATH (docs/keys.json)
+# - 'direct_internet': Use direct freedom outbound (no proxy, direct internet)
+KEY_SOURCE_MODE = os.getenv("KEY_SOURCE_MODE", "keys_json")
+
 # Multi-client settings
 CLIENT_UUIDS = []
 CLIENT_KEYS = []
@@ -87,6 +92,7 @@ def log_environment_variables():
         "CHECK_TIMEOUT",
         "CHECK_INTERVAL",
         "GATEWAY_MODE",
+        "KEY_SOURCE_MODE",
         "SS_INBOUND_PORT",
         "SS_PASSWORD",
         "SS_METHOD",
@@ -119,6 +125,111 @@ def log_environment_variables():
     logger.info("=" * 60)
     logger.info("=== ENVIRONMENT VARIABLES DUMP END ===")
     logger.info("=" * 60)
+
+
+def get_best_key_from_keys_json(keys_path: str) -> Optional[str]:
+    """Get best key from KEYS_JSON_PATH file.
+    
+    Reads JSON file and extracts the best working key
+    from any country's top10/top5 list or best field.
+    
+    Args:
+        keys_path: Path to keys.json file
+        
+    Returns:
+        Best key string or None if no keys found
+    """
+    try:
+        if not os.path.exists(keys_path):
+            logger.error(f"Keys file not found: {keys_path}")
+            return None
+        
+        with open(keys_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        
+        def extract_best_key(obj) -> Optional[str]:
+            """Recursively extract best key from nested JSON."""
+            if isinstance(obj, dict):
+                # Check for 'best' field directly
+                if "best" in obj and isinstance(obj["best"], str):
+                    return obj["best"]
+                
+                # Check top10/top5 for first key
+                for top_key in ["top10", "top5"]:
+                    if top_key in obj and isinstance(obj[top_key], list) and len(obj[top_key]) > 0:
+                        first_entry = obj[top_key][0]
+                        if isinstance(first_entry, dict) and "key" in first_entry:
+                            return first_entry["key"]
+                
+                # Recursively check nested dicts
+                for value in obj.values():
+                    result = extract_best_key(value)
+                    if result:
+                        return result
+            
+            elif isinstance(obj, list):
+                for item in obj:
+                    result = extract_best_key(item)
+                    if result:
+                        return result
+            
+            return None
+        
+        best_key = extract_best_key(data)
+        
+        if best_key:
+            logger.info(f"Best key from {keys_path}: {best_key[:50]}...")
+        
+        return best_key
+        
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse keys JSON: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Failed to get best key from keys JSON: {e}")
+        return None
+
+
+async def get_active_vless_key() -> Optional[str]:
+    """Get active VLESS key using unified logic.
+    
+    Logic priority:
+    1. If KEY_SOURCE_MODE=direct_internet: return None (use freedom outbound)
+    2. Try to get current key from Xray config
+    3. If not found or invalid, get best key from KEYS_JSON_PATH
+    4. If still not found, return None
+    
+    Returns:
+        VLESS key string or None for direct internet mode or no keys available
+    """
+    logger.info(f"KEY_SOURCE_MODE: {KEY_SOURCE_MODE}")
+    
+    # Direct internet mode - no VLESS key needed
+    if KEY_SOURCE_MODE == "direct_internet":
+        logger.info("Using direct internet mode (no VLESS proxy)")
+        return None
+    
+    # Keys JSON mode - try Xray config first, then fallback to KEYS_JSON_PATH
+    if KEY_SOURCE_MODE == "keys_json":
+        # Try to get current key from Xray config
+        current_key = await _get_current_xray_key()
+        if current_key:
+            logger.info(f"Found current key from Xray config: {current_key[:50]}...")
+            return current_key
+        
+        logger.info("No current key found in Xray config, fetching best from KEYS_JSON_PATH...")
+        
+        # Fall back to best key from KEYS_JSON_PATH
+        best_key = get_best_key_from_keys_json(KEYS_JSON_PATH)
+        if best_key:
+            logger.info(f"Using best key from KEYS_JSON_PATH: {best_key[:50]}...")
+            return best_key
+        
+        logger.error("No keys available from KEYS_JSON_PATH")
+        return None
+    
+    logger.error(f"Invalid KEY_SOURCE_MODE: {KEY_SOURCE_MODE}")
+    return None
 
 
 class XrayManager:
@@ -318,7 +429,7 @@ class XrayManager:
                 "network": "tcp,udp"
             })
         
-        # Proxy outbound rule
+        # Proxy outbound rule (only when using VLESS)
         if vless_info or client_vless_infos:
             routing_rules.append({
                 "type": "field",
@@ -333,11 +444,30 @@ class XrayManager:
         
         return config
     
+    def generate_direct_internet_config(self):
+        """Generate Xray configuration for direct internet mode (no proxy).
+        
+        Returns:
+            Xray configuration dict with freedom outbound
+        """
+        return self.generate_config()  # Call generate_config with no VLESS info
+    
     async def apply_config(self, key=None):
-        """Apply Xray configuration."""
+        """Apply Xray configuration.
+        
+        Args:
+            key: VLESS key string. If None and KEY_SOURCE_MODE=direct_internet,
+                 uses freedom outbound (direct internet).
+        """
         import json
         
-        if GATEWAY_MODE == "multi":
+        # Direct internet mode - no VLESS key needed
+        if KEY_SOURCE_MODE == "direct_internet":
+            logger.info("=== Direct Internet Mode ===")
+            logger.info("Using freedom outbound (direct internet, no proxy)")
+            config = self.generate_config()
+            logger.debug(f"Generated direct internet config: {json.dumps(config, indent=2)}")
+        elif GATEWAY_MODE == "multi":
             if not CLIENT_KEYS:
                 logger.error("CLIENT_KEYS is empty for multi-client mode.")
                 return False
@@ -358,6 +488,7 @@ class XrayManager:
             config = self.generate_config(client_vless_infos=client_vless_infos)
             logger.debug(f"Generated multi-client config: {json.dumps(config, indent=2)}")
         else:
+            # Single-key mode - requires key
             if not key:
                 logger.error("No key provided for single-key mode.")
                 return False
@@ -489,25 +620,42 @@ async def main(use_keys: bool = True):
     
     xray_manager = XrayManager(XRAY_CONFIG_PATH)
     
+    # Use new unified key retrieval function
+    active_key = await get_active_vless_key()
+    
     if use_keys:
         monitor = GatewayMonitor(KEYS_JSON_PATH, xray_manager)
+        
+        # If no active key in keys_json mode, try to get best from KEYS_JSON_PATH
+        if not active_key and KEY_SOURCE_MODE == "keys_json":
+            logger.info("Fetching best key from KEYS_JSON_PATH for initial configuration...")
+            best_key = get_best_key_from_keys_json(KEYS_JSON_PATH)
+            if best_key:
+                active_key = best_key
+        
+        if active_key:
+            logger.info(f"Initial key: {active_key[:50]}...")
+            # Apply initial configuration with the active key
+            if not await xray_manager.apply_config(active_key):
+                logger.error("Failed to apply initial configuration.")
+                return
+        
         try:
             await monitor.run()
         except KeyboardInterrupt:
             logger.info("Gateway monitor stopped by user.")
     else:
-        # Use current running Xray configuration
-        logger.info("=== Using current Xray configuration ===")
-        current_key = await _get_current_xray_key()
+        # Use currently active Xray configuration
+        logger.info("=== Using currently active Xray configuration ===")
         
-        if not current_key:
-            logger.error("Could not determine current Xray key. Exiting.")
+        if not active_key:
+            logger.error("Could not determine active key. Exiting.")
             return
         
-        logger.info(f"Current key detected: {current_key[:40]}...")
+        logger.info(f"Active key detected: {active_key[:40]}...")
         
         # Apply current configuration
-        if not await xray_manager.apply_config(current_key):
+        if not await xray_manager.apply_config(active_key):
             logger.error("Failed to apply current configuration.")
             return
         
@@ -517,17 +665,17 @@ async def main(use_keys: bool = True):
         
         # Keep running - use GatewayMonitor's check loop but with single key
         monitor = GatewayMonitor(KEYS_JSON_PATH, xray_manager)
-        monitor.key_pool = [current_key]
+        monitor.key_pool = [active_key]
         monitor.current_index = 0
         
         try:
             # Simple health check loop with current key
             while True:
-                is_alive = await monitor.check_connection(current_key)
+                is_alive = await monitor.check_connection(active_key)
                 if is_alive:
-                    logger.info(f"🟢 Connection healthy to {current_key[:30]}...")
+                    logger.info(f"🟢 Connection healthy to {active_key[:30]}...")
                 else:
-                    logger.warning(f"⚠️ Connection lost to {current_key[:30]}...")
+                    logger.warning(f"⚠️ Connection lost to {active_key[:30]}...")
                 
                 await asyncio.sleep(10.0)  # CHECK_INTERVAL
         except KeyboardInterrupt:
