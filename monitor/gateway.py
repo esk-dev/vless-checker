@@ -89,17 +89,17 @@ class GatewayMonitor:
         vless_info = self.xray_manager.parse_vless_key(key)
         if not vless_info:
             return False
-        logger.debug(f"Vless Info object {vless_info}");
+
         try:
             reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(vless_info["address"], vless_info["port"]),
+                asyncio.open_connection(vless_info.address, vless_info.port),
                 timeout=CHECK_TIMEOUT
             )
             writer.close()
             await writer.wait_closed()
             return True
         except Exception as e:
-            logger.debug(f"Connection check failed for {vless_info['address']}: {e}")
+            logger.debug(f"Connection check failed for {vless_info.address}: {e}")
             return False
     
     async def run(self):
@@ -181,7 +181,7 @@ class GatewayMonitor:
                         continue
                 else:
                     vless_info = self.xray_manager.parse_vless_key(current_key)
-                    node = vless_info["address"] if vless_info else "unknown"
+                    node = vless_info.address if vless_info else "unknown"
                     logger.info(f"🟢 Connection healthy. Node: {node}")
 
                 await asyncio.sleep(CHECK_INTERVAL)
