@@ -130,14 +130,14 @@ def log_environment_variables():
 def get_best_key_from_keys_json(keys_path: str) -> Optional[str]:
     """Get best key from KEYS_JSON_PATH file.
     
-    Reads JSON file and extracts the best working key
-    from any country's top10/top5 list or best field.
+    Reads JSON file and extracts the best working key based on latency.
+    The key with lowest latency_ms is selected as the best.
     
     Args:
         keys_path: Path to keys.json file
         
     Returns:
-        Best key string or None if no keys found
+        Best key string (lowest latency) or None if no keys found
     """
     try:
         if not os.path.exists(keys_path):
@@ -147,38 +147,50 @@ def get_best_key_from_keys_json(keys_path: str) -> Optional[str]:
         with open(keys_path, "r", encoding="utf-8") as f:
             data = json.load(f)
         
-        def extract_best_key(obj) -> Optional[str]:
-            """Recursively extract best key from nested JSON."""
+        best_key = None
+        best_latency = float('inf')
+        
+        def extract_key_with_latency(obj, path=""):
+            """Recursively extract keys with their latency info."""
+            nonlocal best_key, best_latency
+            
             if isinstance(obj, dict):
                 # Check for 'best' field directly
                 if "best" in obj and isinstance(obj["best"], str):
-                    return obj["best"]
+                    key = obj["best"]
+                    if key and best_key is None:
+                        best_key = key
+                    return
                 
-                # Check top10/top5 for first key
+                # Check top10/top5 for keys with latency
                 for top_key in ["top10", "top5"]:
-                    if top_key in obj and isinstance(obj[top_key], list) and len(obj[top_key]) > 0:
-                        first_entry = obj[top_key][0]
-                        if isinstance(first_entry, dict) and "key" in first_entry:
-                            return first_entry["key"]
+                    if top_key in obj and isinstance(obj[top_key], list):
+                        for entry in obj[top_key]:
+                            if isinstance(entry, dict) and "key" in entry:
+                                key = entry["key"]
+                                latency = entry.get("latency_ms", float('inf'))
+                                if isinstance(latency, (int, float)) and latency < best_latency:
+                                    best_latency = latency
+                                    best_key = key
                 
                 # Recursively check nested dicts
-                for value in obj.values():
-                    result = extract_best_key(value)
-                    if result:
-                        return result
+                for key_name, value in obj.items():
+                    if key_name not in ["top10", "top5"]:
+                        extract_key_with_latency(value, f"{path}.{key_name}" if path else key_name)
             
             elif isinstance(obj, list):
                 for item in obj:
-                    result = extract_best_key(item)
-                    if result:
-                        return result
-            
-            return None
+                    extract_key_with_latency(item, path)
         
-        best_key = extract_best_key(data)
+        extract_key_with_latency(data)
         
         if best_key:
-            logger.info(f"Best key from {keys_path}: {best_key[:50]}...")
+            if best_latency != float('inf'):
+                logger.info(f"Best key from {keys_path}: {best_key[:50]}... (latency: {best_latency:.1f}ms)")
+            else:
+                logger.info(f"Best key from {keys_path}: {best_key[:50]}...")
+        else:
+            logger.info(f"No keys found in {keys_path}")
         
         return best_key
         
@@ -240,89 +252,205 @@ class XrayManager:
         self.xray_service_name = xray_service_name
         self.current_key = None
     
-    def parse_vless_key(self, key):
-        """Parse VLESS key using the modular config module."""
-        return parse_vless_key(key)
-    
-    def _build_stream_settings(self, vless_info):
-        """Build stream settings for VLESS outbound."""
-        security = vless_info.get("security", "tls")
+    def parse_vless_key(self, key: str) -> Optional[VLESSInfo]:
+        """Parse VLESS key using the modular config module.
         
-        if security not in ["tls", "reality"]:
+        Args:
+            key: VLESS key string
+            
+        Returns:
+            VLESSInfo object or None if parsing fails
+        """
+        return VLESSInfo.from_key(key)
+    
+    def _build_stream_settings(self, vless_info: VLESSInfo) -> Optional[StreamSettings]:
+        """Build StreamSettings object for VLESS outbound.
+        
+        Args:
+            vless_info: VLESSInfo object with all parameters
+            
+        Returns:
+            StreamSettings object or None if security is 'none'
+        """
+        if vless_info.security not in ["tls", "reality"]:
             return None
         
-        stream_settings = {
-            "network": os.getenv("XRAY_OUTBOUND_NETWORK", "tcp"),
-            "security": security
-        }
-        
-        if security == "tls":
-            stream_settings["tlsSettings"] = {
-                "serverName": vless_info.get("sni")
-            }
-        elif security == "reality":
-            reality_settings = vless_info.get("realitySettings", {})
-            stream_settings["realitySettings"] = {
-                "serverName": reality_settings.get("serverName", vless_info.get("sni")),
-                "publicKey": reality_settings.get("publicKey", ""),
-                "shortId": reality_settings.get("shortId", ""),
-                "spiderX": reality_settings.get("spiderX", "")
-            }
-        
-        return stream_settings
+        return StreamSettings(
+            network=vless_info.network,
+            security=vless_info.security,
+            sni=vless_info.sni,
+            alpn=vless_info.alpn,
+            fp=vless_info.fingerprint,
+            pbk=vless_info.reality_public_key,
+            sid=vless_info.reality_short_id,
+            spiderx=vless_info.reality_spider_x,
+            path=vless_info.path,
+            headers=vless_info.headers,
+            host=vless_info.host,
+            mode=vless_info.mode,
+            extra=vless_info.extra,
+            allow_insecure=vless_info.allow_insecure,
+            packet_encoding=vless_info.packet_encoding,
+            header_type=vless_info.header_type,
+        )
     
-    def _build_vless_outbound(self, vless_info, tag, client_uuid=None, is_chain=False):
-        """Build a single VLESS outbound configuration."""
-        flow = vless_info.get("flow", "")
+    def _build_vless_outbound_config(self, vless_info: VLESSInfo, tag: str, client_uuid: Optional[str] = None, is_chain: bool = False) -> OutboundConfig:
+        """Build an OutboundConfig object for VLESS.
+        
+        Args:
+            vless_info: VLESSInfo object with all parameters
+            tag: Tag for the outbound
+            client_uuid: Optional client UUID for multi-client mode
+            is_chain: If True, mark this as a chain outbound
+            
+        Returns:
+            OutboundConfig object
+        """
+        flow = vless_info.flow or ""
+        uuid = vless_info.uuid if client_uuid is None else client_uuid
+        
+        settings = {
+            "vnext": [{
+                "address": vless_info.address,
+                "port": vless_info.port,
+                "users": [{
+                    "id": uuid,
+                    "encryption": vless_info.encryption,
+                    "flow": flow
+                }]
+            }]
+        }
         
         stream_settings = self._build_stream_settings(vless_info)
         
-        outbound = {
-            "protocol": vless_info.get("type", "vless"),
-            "settings": {
-                "vnext": [{
-                    "address": vless_info["address"],
-                    "port": vless_info["port"],
-                    "users": [{
-                        "id": vless_info["uuid"] if client_uuid is None else client_uuid,
-                        "encryption": vless_info["encryption"],
-                        "flow": flow
-                    }]
-                }]
-            },
-            "streamSettings": stream_settings,
-            "tag": tag
-        }
-        
-        return outbound
+        return OutboundConfig(
+            tag=tag,
+            protocol="vless",
+            settings=settings,
+            stream_settings=stream_settings,
+        )
     
-    def _build_chain_vless_outbound(self, chain_key):
-        """Build a chain VLESS outbound configuration."""
+    def _build_vless_outbound(self, vless_info: VLESSInfo, tag: str, client_uuid: Optional[str] = None, is_chain: bool = False) -> Dict[str, Any]:
+        """Build a single VLESS outbound configuration.
+        
+        Args:
+            vless_info: VLESSInfo object with all parameters
+            tag: Tag for the outbound
+            client_uuid: Optional client UUID for multi-client mode
+            is_chain: If True, mark this as a chain outbound
+            
+        Returns:
+            Outbound configuration dict
+        """
+        outbound_config = self._build_vless_outbound_config(vless_info, tag, client_uuid, is_chain)
+        return self._outbound_config_to_dict(outbound_config)
+    
+    def _outbound_config_to_dict(self, outbound_config: OutboundConfig) -> Dict[str, Any]:
+        """Convert OutboundConfig to dictionary.
+        
+        Args:
+            outbound_config: OutboundConfig object
+            
+        Returns:
+            Dictionary representation
+        """
+        config = {
+            "protocol": outbound_config.protocol,
+            "tag": outbound_config.tag,
+            "settings": outbound_config.settings,
+        }
+        if outbound_config.stream_settings:
+            stream = {
+                "network": outbound_config.stream_settings.network,
+                "security": outbound_config.stream_settings.security,
+            }
+            
+            # Handle per-network settings
+            network = outbound_config.stream_settings.network
+            if network == "xhttp":
+                xhttp_settings = {
+                    "path": outbound_config.stream_settings.path or "/",
+                    "mode": outbound_config.stream_settings.mode or "auto",
+                }
+                if outbound_config.stream_settings.host:
+                    xhttp_settings["host"] = outbound_config.stream_settings.host
+                if outbound_config.stream_settings.extra:
+                    xhttp_settings["extra"] = outbound_config.stream_settings.extra
+                stream["xhttpSettings"] = xhttp_settings
+            elif network == "ws":
+                ws_settings = {
+                    "path": outbound_config.stream_settings.path or "/",
+                }
+                if outbound_config.stream_settings.headers:
+                    ws_settings["headers"] = outbound_config.stream_settings.headers
+                elif outbound_config.stream_settings.host:
+                    ws_settings["headers"] = {"Host": outbound_config.stream_settings.host}
+                stream["wsSettings"] = ws_settings
+            elif network == "grpc":
+                grpc_settings = {
+                    "serviceName": outbound_config.stream_settings.path or "",
+                }
+                if outbound_config.stream_settings.mode == "multiMode" or outbound_config.stream_settings.mode == "gun":
+                    grpc_settings["multiMode"] = True
+                if outbound_config.stream_settings.host:
+                    grpc_settings["authority"] = outbound_config.stream_settings.host
+                stream["grpcSettings"] = grpc_settings
+            elif network == "kcp":
+                kcp_settings = {
+                    "mtu": 1350,
+                }
+                if outbound_config.stream_settings.header_type:
+                    kcp_settings["header"] = {"type": outbound_config.stream_settings.header_type}
+                if outbound_config.stream_settings.path:
+                    kcp_settings["seed"] = outbound_config.stream_settings.path
+                stream["kcpSettings"] = kcp_settings
+            
+            # Handle TLS/REALITY settings
+            if outbound_config.stream_settings.security == "tls":
+                tls_settings = {
+                    "serverName": outbound_config.stream_settings.sni
+                }
+                if outbound_config.stream_settings.fp:
+                    tls_settings["fingerprint"] = outbound_config.stream_settings.fp
+                if outbound_config.stream_settings.alpn:
+                    tls_settings["alpn"] = outbound_config.stream_settings.alpn
+                if outbound_config.stream_settings.allow_insecure:
+                    tls_settings["allowInsecure"] = True
+                stream["tlsSettings"] = tls_settings
+            elif outbound_config.stream_settings.security == "reality":
+                reality_settings = {
+                    "serverName": outbound_config.stream_settings.sni,
+                    "publicKey": outbound_config.stream_settings.pbk or "",
+                    "shortId": outbound_config.stream_settings.sid or "",
+                    "spiderX": outbound_config.stream_settings.spiderx or ""
+                }
+                if outbound_config.stream_settings.fp:
+                    reality_settings["fingerprint"] = outbound_config.stream_settings.fp
+                stream["realitySettings"] = reality_settings
+            
+            config["streamSettings"] = stream
+            
+            # Add packet encoding
+            if outbound_config.stream_settings.packet_encoding:
+                stream["packetEncoding"] = outbound_config.stream_settings.packet_encoding
+        
+        return config
+    
+    def _build_chain_vless_outbound(self, chain_key: str) -> Optional[Dict[str, Any]]:
+        """Build a chain VLESS outbound configuration.
+        
+        Args:
+            chain_key: VLESS key string for chain outbound
+            
+        Returns:
+            Outbound configuration dict or None if parsing fails
+        """
         vless_info = self.parse_vless_key(chain_key)
         if not vless_info:
             logger.error("Failed to parse chain VLESS key")
             return None
         
-        stream_settings = self._build_stream_settings(vless_info)
-        
-        outbound = {
-            "protocol": vless_info.get("type", "vless"),
-            "settings": {
-                "vnext": [{
-                    "address": vless_info["address"],
-                    "port": vless_info["port"],
-                    "users": [{
-                        "id": vless_info["uuid"],
-                        "encryption": vless_info["encryption"],
-                        "flow": vless_info.get("flow", "")
-                    }]
-                }]
-            },
-            "streamSettings": stream_settings,
-            "tag": "chain-vless-out"
-        }
-        
-        return outbound
+        return self._build_vless_outbound(vless_info, "chain-vless-out", is_chain=True)
     
     def generate_config(self, vless_info=None, client_vless_infos=None):
         """Generate Xray configuration."""

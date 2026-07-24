@@ -7,6 +7,7 @@ This module provides:
 """
 from dataclasses import dataclass
 from typing import Optional, List, Dict, Any
+from urllib.parse import unquote_plus
 
 
 @dataclass
@@ -24,6 +25,12 @@ class StreamSettings:
         spiderx: SpiderX for REALITY
         path: Path for WebSocket or xhttp
         headers: Custom headers for WebSocket or xhttp
+        allow_insecure: Allow insecure TLS connections
+        host: Host header for WebSocket or xhttp
+        mode: Mode for xhttp or grpc
+        extra: Extra settings as JSON dict
+        packet_encoding: Packet encoding for xudp
+        header_type: Header type for TCP
     """
     network: str = "tcp"
     security: str = "tls"
@@ -35,6 +42,12 @@ class StreamSettings:
     spiderx: Optional[str] = None
     path: Optional[str] = None
     headers: Optional[Dict[str, List[str]]] = None
+    allow_insecure: bool = False
+    host: Optional[str] = None
+    mode: Optional[str] = None
+    extra: Optional[Dict[str, Any]] = None
+    packet_encoding: Optional[str] = None
+    header_type: Optional[str] = None
 
 
 @dataclass
@@ -209,18 +222,67 @@ class XrayConfigBuilder:
                 "network": outbound.stream_settings.network,
                 "security": outbound.stream_settings.security,
             }
+            if outbound.stream_settings.network == "xhttp":
+                xhttp_settings = {
+                    "path": outbound.stream_settings.path or "/",
+                    "mode": outbound.stream_settings.mode or "auto",
+                }
+                if outbound.stream_settings.host:
+                    xhttp_settings["host"] = outbound.stream_settings.host
+                if outbound.stream_settings.extra:
+                    xhttp_settings["extra"] = outbound.stream_settings.extra
+                stream["xhttpSettings"] = xhttp_settings
+            elif outbound.stream_settings.network == "ws":
+                ws_settings = {
+                    "path": outbound.stream_settings.path or "/",
+                }
+                if outbound.stream_settings.headers:
+                    ws_settings["headers"] = outbound.stream_settings.headers
+                if outbound.stream_settings.host:
+                    ws_settings["headers"] = {"Host": outbound.stream_settings.host}
+                stream["wsSettings"] = ws_settings
+            elif outbound.stream_settings.network == "grpc":
+                grpc_settings = {
+                    "serviceName": outbound.stream_settings.path or "",
+                }
+                if outbound.stream_settings.mode == "multiMode" or outbound.stream_settings.mode == "gun":
+                    grpc_settings["multiMode"] = True
+                if outbound.stream_settings.host:
+                    grpc_settings["authority"] = outbound.stream_settings.host
+                stream["grpcSettings"] = grpc_settings
+            elif outbound.stream_settings.network == "kcp":
+                kcp_settings = {
+                    "mtu": 1350,
+                }
+                if outbound.stream_settings.header_type:
+                    kcp_settings["header"] = {"type": outbound.stream_settings.header_type}
+                if outbound.stream_settings.path:
+                    kcp_settings["seed"] = outbound.stream_settings.path
+                stream["kcpSettings"] = kcp_settings
             if outbound.stream_settings.security == "tls":
-                stream["tlsSettings"] = {
+                tls_settings = {
                     "serverName": outbound.stream_settings.sni
                 }
+                if outbound.stream_settings.fp:
+                    tls_settings["fingerprint"] = outbound.stream_settings.fp
+                if outbound.stream_settings.alpn:
+                    tls_settings["alpn"] = outbound.stream_settings.alpn
+                if outbound.stream_settings.allow_insecure:
+                    tls_settings["allowInsecure"] = True
+                stream["tlsSettings"] = tls_settings
             elif outbound.stream_settings.security == "reality":
-                stream["realitySettings"] = {
+                reality_settings = {
                     "serverName": outbound.stream_settings.sni,
                     "publicKey": outbound.stream_settings.pbk or "",
                     "shortId": outbound.stream_settings.sid or "",
                     "spiderX": outbound.stream_settings.spiderx or ""
                 }
+                if outbound.stream_settings.fp:
+                    reality_settings["fingerprint"] = outbound.stream_settings.fp
+                stream["realitySettings"] = reality_settings
             config["streamSettings"] = stream
+            if outbound.stream_settings.packet_encoding:
+                stream["packetEncoding"] = outbound.stream_settings.packet_encoding
         if outbound.proxy_settings:
             config["proxySettings"] = outbound.proxy_settings
         self.outbounds.append(config)
