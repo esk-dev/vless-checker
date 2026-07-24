@@ -32,7 +32,7 @@ from config.warp import WarpConfig
 from config.ipv6 import IPv6Config
 from config.rules import RoutingRulesBuilder
 from config.ss import generate_shadowsocks_key
-from config.loader import load_key_pool, get_best_key_from_keys_json
+from config.loader import load_key_pool, get_best_key
 from monitor.gateway import GatewayMonitor
 
 
@@ -151,7 +151,7 @@ async def get_active_vless_key() -> Optional[str]:
     # Keys JSON mode - try Xray config first, then fallback to KEYS_JSON_PATH
     if KEY_SOURCE_MODE == "keys_json":
         # Try to get current key from Xray config
-        current_key = await _get_current_xray_key()
+        current_key = await get_current_xray_key(XRAY_CONFIG_PATH)
         if current_key:
             logger.info(f"Found current key from Xray config: {current_key[:50]}...")
             return current_key
@@ -159,7 +159,7 @@ async def get_active_vless_key() -> Optional[str]:
         logger.info("No current key found in Xray config, fetching best from KEYS_JSON_PATH...")
         
         # Fall back to best key from KEYS_JSON_PATH
-        best_key = get_best_key_from_keys_json(KEYS_JSON_PATH)
+        best_key = get_best_key(KEYS_JSON_PATH)
         if best_key:
             logger.info(f"Using best key from KEYS_JSON_PATH: {best_key[:50]}...")
             return best_key
@@ -621,7 +621,7 @@ async def main(use_keys: bool = True):
         # If no active key in keys_json mode, try to get best from KEYS_JSON_PATH
         if not active_key and KEY_SOURCE_MODE == "keys_json":
             logger.info("Fetching best key from KEYS_JSON_PATH for initial configuration...")
-            best_key = get_best_key_from_keys_json(KEYS_JSON_PATH)
+            best_key = get_best_key(KEYS_JSON_PATH)
             if best_key:
                 active_key = best_key
         
