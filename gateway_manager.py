@@ -151,7 +151,7 @@ async def get_active_vless_key() -> Optional[str]:
     # Keys JSON mode - try Xray config first, then fallback to KEYS_JSON_PATH
     if KEY_SOURCE_MODE == "keys_json":
         # Try to get current key from Xray config
-        current_key = await get_current_xray_key(XRAY_CONFIG_PATH)
+        current_key = get_current_xray_key(XRAY_CONFIG_PATH)
         if current_key:
             logger.info(f"Found current key from Xray config: {current_key[:50]}...")
             return current_key
