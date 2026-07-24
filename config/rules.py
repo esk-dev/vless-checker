@@ -1,3 +1,4 @@
+# rules.py
 """Routing rules builder for Xray configuration.
 
 This module handles:
@@ -48,20 +49,10 @@ class RoutingRulesBuilder:
         Returns:
             List of IPv6 routing rules
         """
-        return [
-            # Block IPv6 traffic via proxy - route to blocked
-            {
-                "type": "field",
-                "ip": ["geoip6:all"],
-                "outboundTag": "blocked"
-            },
-            # Allow Russian IPv6 traffic to go direct
-            {
-                "type": "field",
-                "ip": ["geoip6:ru"],
-                "outboundTag": "direct"
-            }
-        ]
+        # Note: geoip6:all and geoip6:ru are not available in geoip.dat
+        # The runetfreedom geoip.dat only contains IPv4 ranges
+        # If IPv6 blocking is needed, use outbound tag "blocked" with domain rules
+        return []
     
     def build_warp_rules(self) -> List[Dict[str, Any]]:
         """Build WARP routing rules.
