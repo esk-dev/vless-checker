@@ -431,8 +431,40 @@ async def _get_current_xray_key() -> Optional[str]:
                     address = vnext[0].get("address", "")
                     port = vnext[0].get("port", 443)
                     
+                    # Get stream settings for TLS/REALITY
+                    stream = outbound.get("streamSettings", {})
+                    security = stream.get("security", "none")
+                    network = stream.get("network", "tcp")
+                    
+                    # Build query parameters
+                    params = []
+                    if security != "none":
+                        params.append(f"security={security}")
+                    if security in ["tls", "reality"]:
+                        tls_settings = stream.get("tlsSettings", {})
+                        sni = tls_settings.get("serverName", "")
+                        if sni:
+                            params.append(f"sni={sni}")
+                    if security == "reality":
+                        reality_settings = stream.get("realitySettings", {})
+                        pbk = reality_settings.get("publicKey", "")
+                        sid = reality_settings.get("shortId", "")
+                        spider_x = reality_settings.get("spiderX", "")
+                        if pbk:
+                            params.append(f"pbk={pbk}")
+                        if sid:
+                            params.append(f"sid={sid}")
+                        if spider_x:
+                            params.append(f"spiderX={spider_x}")
+                    params.append(f"type={network}")
+                    
                     # Reconstruct VLESS key
-                    return parse_vless_key(f"vless://{uuid}@{address}:{port}")
+                    key = f"vless://{uuid}@{address}:{port}"
+                    if params:
+                        key += "?" + "&".join(params)
+                    key += "#current-xray-config"
+                    
+                    return key
     except Exception as e:
         logger.error(f"Failed to get current Xray key: {e}")
     
