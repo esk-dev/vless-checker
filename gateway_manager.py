@@ -257,7 +257,7 @@ class XrayManager:
             stream_settings=stream_settings,
         )
     
-    def _build_vless_outbound(self, vless_info: VLESSInfo, tag: str, client_uuid: Optional[str] = None, is_chain: bool = False) -> Dict[str, Any]:
+    def _build_vless_outbound(self, vless_info: VLESSInfo, tag: str, client_uuid: Optional[str] = None, is_chain: bool = False) -> dict[str, any]:
         """Build a single VLESS outbound configuration.
         
         Args:
@@ -272,7 +272,7 @@ class XrayManager:
         outbound_config = self._build_vless_outbound_config(vless_info, tag, client_uuid, is_chain)
         return self._outbound_config_to_dict(outbound_config)
     
-    def _outbound_config_to_dict(self, outbound_config: OutboundConfig) -> Dict[str, Any]:
+    def _outbound_config_to_dict(self, outbound_config: OutboundConfig) -> dict[str, any]:
         """Convert OutboundConfig to dictionary.
         
         Args:
@@ -363,7 +363,7 @@ class XrayManager:
         
         return config
     
-    def _build_chain_vless_outbound(self, chain_key: str) -> Optional[Dict[str, Any]]:
+    def _build_chain_vless_outbound(self, chain_key: str) -> Optional[dict[str, any]]:
         """Build a chain VLESS outbound configuration.
         
         Args:
