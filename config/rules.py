@@ -31,7 +31,7 @@ class RoutingRulesBuilder:
             # ru-IPs - direct
             {
                 "type": "field",
-                "ip": ["geoip:ru"],
+                "ip": ["geoip:ru-blocked"],
                 "outboundTag": "direct"
             },
             # Blocked sites - direct (block or direct)
