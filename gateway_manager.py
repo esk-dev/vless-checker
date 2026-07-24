@@ -466,7 +466,7 @@ async def main(use_keys: bool = True):
     else:
         # Use current running Xray configuration
         logger.info("=== Using current Xray configuration ===")
-        current_key = _get_current_xray_key()
+        current_key = await _get_current_xray_key()
         
         if not current_key:
             logger.error("Could not determine current Xray key. Exiting.")
