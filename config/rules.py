@@ -28,12 +28,6 @@ class RoutingRulesBuilder:
             List of base routing rules
         """
         return [
-            # ru-domains - direct
-            {
-                "type": "field",
-                "domain": ["geosite:ru"],
-                "outboundTag": "direct"
-            },
             # ru-IPs - direct
             {
                 "type": "field",
