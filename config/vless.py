@@ -60,6 +60,42 @@ class VLESSInfo:
     packet_encoding: Optional[str] = None
     header_type: Optional[str] = None
     
+    def to_key(self, tag: Optional[str] = None) -> str:
+        """Convert VLESSInfo to a VLESS key string.
+        
+        This is the inverse of from_key() - it reconstructs the
+        VLESS URL from the parsed components.
+        
+        Args:
+            tag: Optional tag for the connection (shown after #)
+            
+        Returns:
+            VLESS key string in format: vless://UUID@HOST:PORT?PARAMS#TAG
+        """
+        return key_to_vless_string(
+            uuid=self.uuid,
+            address=self.address,
+            port=self.port,
+            encryption=self.encryption,
+            security=self.security,
+            sni=self.sni,
+            flow=self.flow,
+            network=self.network,
+            host=self.host,
+            path=self.path,
+            alpn=self.alpn,
+            fingerprint=self.fingerprint,
+            allow_insecure=self.allow_insecure,
+            mode=self.mode,
+            extra=self.extra,
+            packet_encoding=self.packet_encoding,
+            header_type=self.header_type,
+            reality_public_key=self.reality_public_key,
+            reality_short_id=self.reality_short_id,
+            reality_spider_x=self.reality_spider_x,
+            tag=tag
+        )
+    
     @classmethod
     def from_key(cls, key: str) -> Optional['VLESSInfo']:
         """Parse a VLESS key string into VLESSInfo.
@@ -374,3 +410,195 @@ def parse_vless_key(key: str) -> Optional[Dict[str, Any]]:
         }
     
     return result
+
+
+def key_to_vless_string(
+    uuid: str,
+    address: str,
+    port: int,
+    encryption: str = "none",
+    security: str = "tls",
+    sni: Optional[str] = None,
+    flow: Optional[str] = None,
+    network: str = "tcp",
+    host: Optional[str] = None,
+    path: Optional[str] = None,
+    alpn: Optional[List[str]] = None,
+    fingerprint: Optional[str] = None,
+    allow_insecure: bool = False,
+    mode: Optional[str] = None,
+    extra: Optional[Dict[str, Any]] = None,
+    packet_encoding: Optional[str] = None,
+    header_type: Optional[str] = None,
+    reality_public_key: Optional[str] = None,
+    reality_short_id: Optional[str] = None,
+    reality_spider_x: Optional[str] = None,
+    tag: Optional[str] = None
+) -> str:
+    """Convert VLESS parameters to a VLESS key string.
+    
+    This is the inverse of VLESSInfo.from_key() - it reconstructs the
+    VLESS URL from individual components.
+    
+    Args:
+        uuid: UUID for the VLESS connection
+        address: Server address
+        port: Server port
+        encryption: Encryption method (default: "none")
+        security: Security type (tls, reality, none - default: "tls")
+        sni: Server Name Indication for TLS
+        flow: Flow setting (e.g., "xtls-rprx-vision")
+        network: Network type (tcp, xhttp, ws, grpc, kcp)
+        host: Host header for WebSocket or xhttp
+        path: Path for WebSocket or xhttp
+        alpn: Application-Layer Protocol Negotiation list
+        fingerprint: Fingerprint for TLS
+        allow_insecure: Allow insecure TLS connections
+        mode: Mode for xhttp or grpc
+        extra: Extra settings as JSON dict
+        packet_encoding: Packet encoding for xudp
+        header_type: Header type for TCP
+        reality_public_key: Public key for REALITY protocol
+        reality_short_id: Short ID for REALITY protocol
+        reality_spider_x: SpiderX for REALITY protocol
+        tag: Tag for the connection (shown after #)
+        
+    Returns:
+        VLESS key string in format: vless://UUID@HOST:PORT?PARAMS#TAG
+    """
+    # Build query parameters
+    params = []
+    
+    if encryption and encryption != "none":
+        params.append(f"encryption={encryption}")
+    
+    if security and security != "tls":
+        params.append(f"security={security}")
+    
+    if flow:
+        params.append(f"flow={flow}")
+    
+    if network and network != "tcp":
+        params.append(f"type={network}")
+    
+    if host:
+        params.append(f"host={host}")
+    
+    if path:
+        params.append(f"path={path}")
+    
+    if alpn:
+        params.append(f"alpn={','.join(alpn)}")
+    
+    if fingerprint:
+        params.append(f"fp={fingerprint}")
+    
+    if allow_insecure:
+        params.append("allowinsecure=1")
+    
+    if mode:
+        params.append(f"mode={mode}")
+    
+    if extra:
+        import json
+        params.append(f"extra={json.dumps(extra)}")
+    
+    if packet_encoding:
+        params.append(f"packetEncoding={packet_encoding}")
+    
+    if header_type:
+        params.append(f"headerType={header_type}")
+    
+    # REALITY parameters
+    if security == "reality":
+        if reality_public_key:
+            params.append(f"pbk={reality_public_key}")
+        if reality_short_id:
+            params.append(f"sid={reality_short_id}")
+        if reality_spider_x:
+            params.append(f"spiderX={reality_spider_x}")
+    
+    # Build the key
+    key = f"vless://{uuid}@{address}:{port}"
+    
+    if params:
+        key += "?" + "&".join(params)
+    
+    if tag:
+        key += f"#{tag}"
+    
+    return key
+
+
+def get_current_xray_key(xray_config_path: str) -> Optional[str]:
+    """Get current VLESS key from active Xray configuration.
+    
+    This is the inverse of to_key() - it extracts the VLESS parameters
+    from an existing Xray config file and reconstructs the VLESS key.
+    
+    Args:
+        xray_config_path: Path to Xray configuration JSON file
+        
+    Returns:
+        VLESS key string if found, None otherwise
+    """
+    import os
+    import json
+    
+    try:
+        if not os.path.exists(xray_config_path):
+            logger.warning(f"Xray config not found: {xray_config_path}")
+            return None
+        
+        with open(xray_config_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+        
+        # Look for VLESS outbound in config
+        for outbound in config.get("outbounds", []):
+            if outbound.get("protocol") == "vless":
+                settings = outbound.get("settings", {})
+                vnext = settings.get("vnext", [])
+                if vnext:
+                    user = vnext[0].get("users", [{}])[0]
+                    uuid = user.get("id", "")
+                    address = vnext[0].get("address", "")
+                    port = vnext[0].get("port", 443)
+                    
+                    # Get stream settings for TLS/REALITY
+                    stream = outbound.get("streamSettings", {})
+                    security = stream.get("security", "none")
+                    network = stream.get("network", "tcp")
+                    
+                    # Build query parameters
+                    params = []
+                    if security != "none":
+                        params.append(f"security={security}")
+                    if security in ["tls", "reality"]:
+                        tls_settings = stream.get("tlsSettings", {})
+                        sni = tls_settings.get("serverName", "")
+                        if sni:
+                            params.append(f"sni={sni}")
+                    if security == "reality":
+                        reality_settings = stream.get("realitySettings", {})
+                        pbk = reality_settings.get("publicKey", "")
+                        sid = reality_settings.get("shortId", "")
+                        spider_x = reality_settings.get("spiderX", "")
+                        if pbk:
+                            params.append(f"pbk={pbk}")
+                        if sid:
+                            params.append(f"sid={sid}")
+                        if spider_x:
+                            params.append(f"spiderX={spider_x}")
+                    params.append(f"type={network}")
+                    
+                    # Reconstruct VLESS key
+                    key = f"vless://{uuid}@{address}:{port}"
+                    if params:
+                        key += "?" + "&".join(params)
+                    key += "#current-xray-config"
+                    
+                    return key
+    except Exception as e:
+        logger.error(f"Failed to get current Xray key: {e}")
+    
+    return None

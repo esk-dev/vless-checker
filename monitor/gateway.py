@@ -5,13 +5,23 @@ This module handles:
 - Checking connection health
 - Main monitoring loop with automatic key rotation
 """
-import json
 import asyncio
 import logging
-import os
 from typing import List, Optional
 
+from config.loader import load_key_pool, get_best_key
+from monitor.rotator import KeyRotator
+
 logger = logging.getLogger(__name__)
+
+# Import configuration values
+try:
+    from gateway_manager import CHECK_TIMEOUT, CHECK_INTERVAL, GATEWAY_MODE
+except ImportError:
+    # Fallback to defaults if gateway_manager is not available
+    CHECK_TIMEOUT = 5.0
+    CHECK_INTERVAL = 10.0
+    GATEWAY_MODE = "single"
 
 
 class GatewayMonitor:
@@ -38,7 +48,8 @@ class GatewayMonitor:
         self.keys_path = keys_path
         self.xray_manager = xray_manager
         self.key_pool: List[str] = []
-        self.current_index = 0
+        self.rotator: Optional[KeyRotator] = None
+        self._loaded = False
     
     def load_key_pool(self) -> bool:
         """Load VLESS keys from JSON file.
@@ -47,39 +58,24 @@ class GatewayMonitor:
             True if keys were loaded successfully
         """
         try:
-            if not os.path.exists(self.keys_path):
-                logger.error(f"Keys file not found: {self.keys_path}")
-                return False
-            
-            with open(self.keys_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            
-            pool = []
-            
-            def extract_keys(obj):
-                """Recursively extract keys from nested JSON structure."""
-                if isinstance(obj, dict):
-                    for k, v in obj.items():
-                        if k in ["top10", "top5"] and isinstance(v, list):
-                            for entry in v:
-                                if isinstance(entry, dict) and "key" in entry:
-                                    pool.append(entry["key"])
-                        else:
-                            extract_keys(v)
-                elif isinstance(obj, list):
-                    for item in obj:
-                        extract_keys(item)
-            
-            extract_keys(data)
-            # Remove duplicates while preserving order
-            self.key_pool = list(dict.fromkeys(pool))
-            
+            self.key_pool = load_key_pool(self.keys_path)
+            self.rotator = KeyRotator(self.key_pool)
+            self._loaded = len(self.key_pool) > 0
             logger.info(f"Loaded {len(self.key_pool)} keys from {self.keys_path}")
-            return len(self.key_pool) > 0
+            return self._loaded
         
         except Exception as e:
             logger.error(f"Failed to load key pool: {e}")
+            self._loaded = False
             return False
+    
+    def get_best_key(self) -> Optional[str]:
+        """Get best key from JSON file based on latency.
+        
+        Returns:
+            Best VLESS key string or None if no keys found
+        """
+        return get_best_key(self.keys_path)
     
     async def check_connection(self, key: str) -> bool:
         """Check if a VLESS key is reachable.
@@ -97,7 +93,7 @@ class GatewayMonitor:
         try:
             reader, writer = await asyncio.wait_for(
                 asyncio.open_connection(vless_info["address"], vless_info["port"]),
-                timeout=5.0  # CHECK_TIMEOUT - should be imported from config
+                timeout=CHECK_TIMEOUT
             )
             writer.close()
             await writer.wait_closed()
@@ -115,10 +111,6 @@ class GatewayMonitor:
         - Running the monitoring loop indefinitely
         """
         logger.info("=== STEP 1: INITIALIZATION ===")
-        
-        # Load client settings for multi-client mode
-        # This should be imported from config
-        _load_client_settings()
         
         logger.info(f"Current GATEWAY_MODE: {GATEWAY_MODE}")
         
@@ -142,31 +134,44 @@ class GatewayMonitor:
                 return
             
             logger.info(f"Key pool loaded successfully. Total keys: {len(self.key_pool)}")
-            logger.info(f"Initializing with first key: {self.key_pool[self.current_index][:30]}...")
+            if self.rotator:
+                current_key = self.rotator.get_current_key()
+                logger.info(f"Initializing with first key: {current_key[:30] if current_key else ''}...")
+            
             logger.info("=== STEP 3: APPLY INITIAL CONFIG ===")
-            if not await self.xray_manager.apply_config(self.key_pool[self.current_index]):
-                logger.error("Initial configuration failed.")
+            if self.rotator:
+                initial_key = self.rotator.get_current_key()
+                if not initial_key:
+                    logger.error("No initial key available.")
+                    return
+                if not await self.xray_manager.apply_config(initial_key):
+                    logger.error("Initial configuration failed.")
+                    return
+            else:
+                logger.error("Key rotator not initialized.")
                 return
 
             logger.info("=== STEP 4: START GATEWAY MONITOR ===")
             logger.info("Gateway monitor started.")
 
             while True:
-                if not self.key_pool:
-                    logger.error("Key pool is empty. Exiting.")
+                if not self.rotator or not self.key_pool:
+                    logger.error("Key pool is empty or rotator not initialized. Exiting.")
                     return
-                current_key = self.key_pool[self.current_index]
+                current_key = self.rotator.get_current_key()
+                if not current_key:
+                    logger.error("No current key available.")
+                    return
                 is_alive = await self.check_connection(current_key)
 
                 if not is_alive:
                     logger.warning(f"⚠️ Connection lost! Current key is dead: {current_key[:30]}...")
+                    self.rotator.rotate()
+                    new_key = self.rotator.get_current_key()
                     
-                    self.current_index = (self.current_index + 1) % len(self.key_pool)
-                    new_key = self.key_pool[self.current_index]
-                    
-                    logger.info(f"🔄 Rotating to next key: {new_key[:30]}...")
+                    logger.info(f"🔄 Rotating to next key: {new_key[:30] if new_key else ''}...")
                     logger.info("=== STEP 5: APPLY NEW CONFIG ===")
-                    success = await self.xray_manager.apply_config(new_key)
+                    success = await self.xray_manager.apply_config(new_key) if new_key else False
                     
                     if success:
                         logger.info("✅ Rotation successful.")
@@ -175,18 +180,8 @@ class GatewayMonitor:
                         await asyncio.sleep(1)  # Small delay before retrying
                         continue
                 else:
-                    logger.info(f"🟢 Connection healthy. Node: {self.xray_manager.parse_vless_key(current_key)['address']}")
+                    vless_info = self.xray_manager.parse_vless_key(current_key)
+                    node = vless_info["address"] if vless_info else "unknown"
+                    logger.info(f"🟢 Connection healthy. Node: {node}")
 
-                await asyncio.sleep(10.0)  # CHECK_INTERVAL - should be imported from config
-
-
-# Import these from config for proper module separation
-# GATEWAY_MODE and _load_client_settings should be defined in config module
-GATEWAY_MODE = "single"  # Default, should be imported from config
-
-def _load_client_settings():
-    """Load client settings from environment variables.
-    
-    This should be moved to config module for proper separation.
-    """
-    pass  # Placeholder - implementation should be in config module
+                await asyncio.sleep(CHECK_INTERVAL)

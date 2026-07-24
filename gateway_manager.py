@@ -26,12 +26,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Import new modular components
-from config.vless import VLESSInfo, parse_vless_key
+from config.vless import VLESSInfo, parse_vless_key, key_to_vless_string, get_current_xray_key
 from config.builder import XrayConfigBuilder, OutboundConfig, StreamSettings
 from config.warp import WarpConfig
 from config.ipv6 import IPv6Config
 from config.rules import RoutingRulesBuilder
 from config.ss import generate_shadowsocks_key
+from config.loader import load_key_pool, get_best_key_from_keys_json
 from monitor.gateway import GatewayMonitor
 
 
@@ -126,80 +127,6 @@ def log_environment_variables():
     logger.info("=== ENVIRONMENT VARIABLES DUMP END ===")
     logger.info("=" * 60)
 
-
-def get_best_key_from_keys_json(keys_path: str) -> Optional[str]:
-    """Get best key from KEYS_JSON_PATH file.
-    
-    Reads JSON file and extracts the best working key based on latency.
-    The key with lowest latency_ms is selected as the best.
-    
-    Args:
-        keys_path: Path to keys.json file
-        
-    Returns:
-        Best key string (lowest latency) or None if no keys found
-    """
-    try:
-        if not os.path.exists(keys_path):
-            logger.error(f"Keys file not found: {keys_path}")
-            return None
-        
-        with open(keys_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        
-        best_key = None
-        best_latency = float('inf')
-        
-        def extract_key_with_latency(obj, path=""):
-            """Recursively extract keys with their latency info."""
-            nonlocal best_key, best_latency
-            
-            if isinstance(obj, dict):
-                # Check for 'best' field directly
-                if "best" in obj and isinstance(obj["best"], str):
-                    key = obj["best"]
-                    if key and best_key is None:
-                        best_key = key
-                    return
-                
-                # Check top10/top5 for keys with latency
-                for top_key in ["top10", "top5"]:
-                    if top_key in obj and isinstance(obj[top_key], list):
-                        for entry in obj[top_key]:
-                            if isinstance(entry, dict) and "key" in entry:
-                                key = entry["key"]
-                                latency = entry.get("latency_ms", float('inf'))
-                                if isinstance(latency, (int, float)) and latency < best_latency:
-                                    best_latency = latency
-                                    best_key = key
-                
-                # Recursively check nested dicts
-                for key_name, value in obj.items():
-                    if key_name not in ["top10", "top5"]:
-                        extract_key_with_latency(value, f"{path}.{key_name}" if path else key_name)
-            
-            elif isinstance(obj, list):
-                for item in obj:
-                    extract_key_with_latency(item, path)
-        
-        extract_key_with_latency(data)
-        
-        if best_key:
-            if best_latency != float('inf'):
-                logger.info(f"Best key from {keys_path}: {best_key[:50]}... (latency: {best_latency:.1f}ms)")
-            else:
-                logger.info(f"Best key from {keys_path}: {best_key[:50]}...")
-        else:
-            logger.info(f"No keys found in {keys_path}")
-        
-        return best_key
-        
-    except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse keys JSON: {e}")
-        return None
-    except Exception as e:
-        logger.error(f"Failed to get best key from keys JSON: {e}")
-        return None
 
 
 async def get_active_vless_key() -> Optional[str]:
@@ -665,69 +592,6 @@ class XrayManager:
         return True
 
 
-async def _get_current_xray_key() -> Optional[str]:
-    """Get current key from active Xray configuration.
-    
-    Returns:
-        VLESS key string if found, None otherwise
-    """
-    try:
-        if not os.path.exists(XRAY_CONFIG_PATH):
-            logger.warning(f"Xray config not found: {XRAY_CONFIG_PATH}")
-            return None
-        
-        with open(XRAY_CONFIG_PATH, "r", encoding="utf-8") as f:
-            config = json.load(f)
-        
-        # Look for VLESS outbound in config
-        for outbound in config.get("outbounds", []):
-            if outbound.get("protocol") == "vless":
-                settings = outbound.get("settings", {})
-                vnext = settings.get("vnext", [])
-                if vnext:
-                    user = vnext[0].get("users", [{}])[0]
-                    uuid = user.get("id", "")
-                    address = vnext[0].get("address", "")
-                    port = vnext[0].get("port", 443)
-                    
-                    # Get stream settings for TLS/REALITY
-                    stream = outbound.get("streamSettings", {})
-                    security = stream.get("security", "none")
-                    network = stream.get("network", "tcp")
-                    
-                    # Build query parameters
-                    params = []
-                    if security != "none":
-                        params.append(f"security={security}")
-                    if security in ["tls", "reality"]:
-                        tls_settings = stream.get("tlsSettings", {})
-                        sni = tls_settings.get("serverName", "")
-                        if sni:
-                            params.append(f"sni={sni}")
-                    if security == "reality":
-                        reality_settings = stream.get("realitySettings", {})
-                        pbk = reality_settings.get("publicKey", "")
-                        sid = reality_settings.get("shortId", "")
-                        spider_x = reality_settings.get("spiderX", "")
-                        if pbk:
-                            params.append(f"pbk={pbk}")
-                        if sid:
-                            params.append(f"sid={sid}")
-                        if spider_x:
-                            params.append(f"spiderX={spider_x}")
-                    params.append(f"type={network}")
-                    
-                    # Reconstruct VLESS key
-                    key = f"vless://{uuid}@{address}:{port}"
-                    if params:
-                        key += "?" + "&".join(params)
-                    key += "#current-xray-config"
-                    
-                    return key
-    except Exception as e:
-        logger.error(f"Failed to get current Xray key: {e}")
-    
-    return None
 
 
 async def main(use_keys: bool = True):
